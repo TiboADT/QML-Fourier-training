@@ -48,8 +48,6 @@ def _get_vram_gb(device: torch.device) -> float:
         return torch.xpu.get_device_properties(device).total_memory / 1024**3
     return 0.0
 
-device = get_device(verbose=True)
-
 # ── Training and cost functions ───────────────────────────────────────────────
 
 def square_loss(targets, predictions):
@@ -62,7 +60,7 @@ def square_loss(targets, predictions):
 
 def cost_model(model):
     def cost(weights, x, y):
-        predictions = torch.stack([model(weights, x_) for x_ in x])
+        predictions = model(weights, x)
         return square_loss(y, predictions)
     return cost
 
@@ -106,7 +104,7 @@ def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit 
 
     weights_shape = weight_tensor_shape(circuit_num, n_qubits, anzats_reps)
     weights_shape = (layers,) + weights_shape
-    weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True, device=device)
+    weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True)
 
     dev = qp.device("default.qubit", wires=n_qubits, shots=None)
 
@@ -155,15 +153,16 @@ def function_to_learn(degree = 1, coeffs = None, coeff0 = 0.1):
     if coeffs is None:
         coeffs = np.random.random(size=degree) + 1j * np.random.random(size=degree)  # coefficients of non-zero frequencies
     coeff0 = 0.1  # coefficient of zero frequency
+    coeffs = coeffs / np.sum(np.abs(coeffs))
+    coeffs = coeffs * (1 - coeff0) / 2 
 
     def target_function(x):
-        x_c = x.to(torch.complex64)
         """Generate a truncated Fourier series, where the data gets re-scaled."""
-        res = torch.full_like(x_c, fill_value=coeff0, dtype=torch.complex64)
+        res = torch.full_like(x, fill_value=coeff0, dtype=torch.complex64)
         for idx, coeff in enumerate(coeffs):
             k = idx + 1
             coeff_t = torch.as_tensor(coeff, dtype=torch.complex64, device=x.device)
-            exponent = 1j * k * x_c
+            exponent = 1j * k * x
             res = res + coeff_t * torch.exp(exponent) + torch.conj(coeff_t) * torch.exp(-exponent)
 
         return torch.real(res)
