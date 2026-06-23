@@ -11,7 +11,7 @@ import functools
 
 import pennylane as qp
 
-from functions import train, show_results, build_model
+from functions import train, show_results, build_model, get_device
 
 # ------------------------------------------------------------------
 # Paths (override before importing if needed)
@@ -95,14 +95,14 @@ def train_and_record(
     n_qubits: int,
     layers: int,
     anzats_reps: int,
-    max_steps: int = 70,
-    batch_size: int = 25,
+    max_steps: int = 200,
+    batch_size: int = 100,
     display_step: int = 10,
     notes: str = "",
     experiments_csv: str = EXPERIMENTS_CSV,
     costs_csv: str = COSTS_CSV,
     train_fn = train,
-    path: str = "results/"
+    path: str = "results/",
 ):
     """
     Run `train`, then persist metadata + cost curve to CSV files.
@@ -143,14 +143,14 @@ def train_and_record(
     timestamp     = datetime.now().isoformat(timespec="seconds")
 
     # ---- run training ------------------------------------------------
-    model,weights = build_model(circuit_num, n_qubits, layers, anzats_reps)
+    model,weights = build_model(circuit_num, n_qubits, layers, anzats_reps, measuring_qubit=n_qubits-1)
 
     final_weights, cst = train_fn(
         model, weights, x, target_y,
         max_steps=max_steps,
         batch_size=batch_size,
         display_step=display_step,
-        display=False
+        display=False,
     )
 
     # ---- write experiment summary row --------------------------------

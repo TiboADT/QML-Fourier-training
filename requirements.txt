@@ -1,0 +1,9 @@
+pennylane
+pennylane-catalyst 
+pennylane-lightning-gpu 
+
+matplotlib
+
+pandas
+
+torch

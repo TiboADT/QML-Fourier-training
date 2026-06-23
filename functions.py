@@ -6,6 +6,51 @@ import torch
 
 from circuits import circuit_set, weight_tensor_shape
 
+# ── Device setup ──────────────────────────────────────────────────────────────
+
+def get_device(verbose: bool = False) -> torch.device:
+    """
+    Return the best available device, checked in this order:
+        1. CUDA  (NVIDIA GPU)
+        2. XPU   (Intel GPU, requires intel-extension-for-pytorch)
+        3. CPU   (fallback)
+    """
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        if verbose:
+            props = torch.cuda.get_device_properties(device)
+            vram  = props.total_memory / 1024**3
+            print(f"GPU found : {props.name}  (CUDA)")
+            print(f"VRAM      : {vram:.1f} GB")
+            print(f"CUDA      : {torch.version.cuda}")
+
+    elif torch.xpu.is_available():
+        device = torch.device("xpu")
+        if verbose:
+            props = torch.xpu.get_device_properties(device)
+            vram  = props.total_memory / 1024**3
+            print(f"GPU found : {props.name}  (Intel XPU)")
+            print(f"VRAM      : {vram:.1f} GB")
+
+    else:
+        device = torch.device("cpu")
+        if verbose:
+            print("No GPU found — running on CPU (no speedup vs original script)")
+
+    return device
+
+
+def _get_vram_gb(device: torch.device) -> float:
+    """Return total VRAM in GB for a CUDA or XPU device."""
+    if device.type == "cuda":
+        return torch.cuda.get_device_properties(device).total_memory / 1024**3
+    elif device.type == "xpu":
+        return torch.xpu.get_device_properties(device).total_memory / 1024**3
+    return 0.0
+
+device = get_device(verbose=True)
+
+# ── Training and cost functions ───────────────────────────────────────────────
 
 def square_loss(targets, predictions):
     loss = 0
@@ -17,12 +62,12 @@ def square_loss(targets, predictions):
 
 def cost_model(model):
     def cost(weights, x, y):
-        predictions = model(weights, x)
+        predictions = torch.stack([model(weights, x_) for x_ in x])
         return square_loss(y, predictions)
     return cost
 
 
-def train(model, weights, x, target_y, max_steps=70, batch_size=25, display_step=10, display=True):
+def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step=10, display=True):
     weights = weights.detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([weights], lr = 0.1)
     cost = cost_model(model)
@@ -61,7 +106,7 @@ def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit 
 
     weights_shape = weight_tensor_shape(circuit_num, n_qubits, anzats_reps)
     weights_shape = (layers,) + weights_shape
-    weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True)
+    weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True, device=device)
 
     dev = qp.device("default.qubit", wires=n_qubits, shots=None)
 
@@ -106,6 +151,24 @@ def show_results(model,weights, x, target_y, cst, title="Results"):
     ax2.set_yscale("log")
     plt.show()
 
+def function_to_learn(degree = 1, coeffs = None, coeff0 = 0.1):
+    if coeffs is None:
+        coeffs = np.random.random(size=degree) + 1j * np.random.random(size=degree)  # coefficients of non-zero frequencies
+    coeff0 = 0.1  # coefficient of zero frequency
+
+    def target_function(x):
+        x_c = x.to(torch.complex64)
+        """Generate a truncated Fourier series, where the data gets re-scaled."""
+        res = torch.full_like(x_c, fill_value=coeff0, dtype=torch.complex64)
+        for idx, coeff in enumerate(coeffs):
+            k = idx + 1
+            coeff_t = torch.as_tensor(coeff, dtype=torch.complex64, device=x.device)
+            exponent = 1j * k * x_c
+            res = res + coeff_t * torch.exp(exponent) + torch.conj(coeff_t) * torch.exp(-exponent)
+
+        return torch.real(res)
+    
+    return target_function
 
 def coucou():
     print("et non en fait")
