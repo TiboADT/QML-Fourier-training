@@ -87,6 +87,7 @@ def circuit_set(name: str = None, num: int = None):
     circuit_names = {
         "SU4": 31,
         "Brickwall": 32,
+        "StronglyEntangling": 30,
     }
     # extend as needed
 
@@ -499,7 +500,12 @@ def circuit_set(name: str = None, num: int = None):
 
 
     #### back to me and copilot
-
+    # ------------------------------------------------------------------
+    # Circuit 30: Strongly entangling layers (PennyLane built-in)
+    # params shape: (num_layers, num_wires, 3)
+    # ------------------------------------------------------------------
+    elif num == 30:
+        return qp.StronglyEntanglingLayers
 
     # ------------------------------------------------------------------
     # Circuit 31: Perfect SU(4) layers
@@ -608,6 +614,8 @@ def weight_tensor_shape(num, num_wires, reps = 1):
     elif num == 18:
         return (reps, num_wires, 3)
     elif num == 19:
+        return (reps, num_wires, 3)
+    elif num == 30:
         return (reps, num_wires, 3)
     elif num == 31:
         return (reps, num_wires//2, 3, 3)
