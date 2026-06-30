@@ -268,11 +268,11 @@ def circuit_set(name: str = None, num: int = None):
 
     # ------------------------------------------------------------------
     # Circuit 9: H layer, CZ chain (fixed), RX layer
-    # params shape: (reps, num_wires)
+    # params shape: (reps, num_wires, 1) for RX angles
     # ------------------------------------------------------------------
     elif num == 9:
         def circ9(params, wires=None):
-            reps, num_wires = params.shape
+            reps, num_wires, _ = params.shape
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -281,17 +281,17 @@ def circuit_set(name: str = None, num: int = None):
                 for q in range(num_wires - 1):
                     qp.CZ(wires=[wires[q], wires[q + 1]])
                 for q in range(num_wires):
-                    qp.RX(params[i, q], wires=wires[q])
+                    qp.RX(params[i, q, 0], wires=wires[q])
 
         return circ9
 
     # ------------------------------------------------------------------
     # Circuit 10: CZ chain with wrap-around + RY layer
-    # params shape: (reps, num_wires)
+    # params shape: (reps, num_wires, 1) for RY angles
     # ------------------------------------------------------------------
     elif num == 10:
         def circ10(params, wires=None):
-            reps, num_wires = params.shape
+            reps, num_wires, _ = params.shape
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -299,7 +299,7 @@ def circuit_set(name: str = None, num: int = None):
                     qp.CZ(wires=[wires[q], wires[q + 1]])
                 qp.CZ(wires=[wires[num_wires - 1], wires[0]])
                 for q in range(num_wires):
-                    qp.RY(params[i, q], wires=wires[q])
+                    qp.RY(params[i, q, 0], wires=wires[q])
 
         return circ10
 
@@ -594,9 +594,9 @@ def weight_tensor_shape(num, num_wires, reps = 1):
     elif num == 8:
         return (reps, num_wires, 5)  # plus separate odd CP tensor
     elif num == 9:
-        return (reps, num_wires)
+        return (reps, num_wires, 1)
     elif num == 10:
-        return (reps, num_wires)
+        return (reps, num_wires, 1)
     elif num == 11:
         return (reps, num_wires, 4)
     elif num == 12:

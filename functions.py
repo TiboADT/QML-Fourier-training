@@ -115,7 +115,7 @@ def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit 
 
     @qp.qnode(dev, interface="torch")
     def circuit(weights,x):
-        (layers,trainable_block_layers,qubits,_) = weights.shape
+        (layers,trainable_block_layers,qubits) = weights.shape[:3]
         layers = layers - 1
         wires = list(range(n_qubits))
         circuit_to_call(weights[0], wires = wires)

@@ -35,7 +35,7 @@ EXPERIMENTS_FIELDS = [
     "notes",
 ]
 
-COSTS_FIELDS = ["experiment_id", "step", "cost"]
+COSTS_FIELDS = ["experiment_id", "n_steps"]
 
 
 def _ensure_csv(path: str, fieldnames: list[str]) -> None:
@@ -77,9 +77,44 @@ def load_costs(costs_csv: str = COSTS_CSV, path: str = None):
     """
     if path is not None:
         costs_csv = os.path.join(path, costs_csv)
+    # Ensure file exists (will create with minimal header if missing)
     _ensure_csv(costs_csv, COSTS_FIELDS)
     with open(costs_csv, "r", newline="") as f:
-        rows = list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        header = reader.fieldnames or []
+        rows = list(reader)
+
+    # Backward-compatible parsing:
+    # - If file has 'step' and 'cost' columns, return list of {experiment_id, step, cost}
+    # - If file uses wide format cost_0, cost_1, ... return list of {experiment_id, n_steps, costs: [...]}
+    if "step" in header and "cost" in header:
+        return rows
+
+    # detect cost_* columns
+    cost_cols = [c for c in header if c.startswith("cost_")]
+    if cost_cols:
+        parsed = []
+        # sort cost columns by index
+        def idx(name):
+            try:
+                return int(name.split("_")[1])
+            except Exception:
+                return 0
+
+        cost_cols = sorted(cost_cols, key=idx)
+        for r in rows:
+            costs = []
+            for c in cost_cols:
+                v = r.get(c, "")
+                costs.append(float(v) if v != "" else None)
+            parsed.append({
+                "experiment_id": r.get("experiment_id"),
+                "n_steps": int(r.get("n_steps", len(costs))) if r.get("n_steps") else len(costs),
+                "costs": costs,
+            })
+        return parsed
+
+    # default fallback
     return rows
 
 
@@ -137,7 +172,9 @@ def train_and_record(
     costs_csv       = costs_csv       if path is None else os.path.join(path, costs_csv)
 
     _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
-    _ensure_csv(costs_csv, COSTS_FIELDS)
+    # ensure costs CSV exists with a header matching this run's max_steps
+    cost_fieldnames = ["experiment_id", "n_steps"] + [f"cost_{i}" for i in range(max_steps)]
+    _ensure_csv(costs_csv, cost_fieldnames)
 
     experiment_id = str(uuid.uuid4())
     timestamp     = datetime.now().isoformat(timespec="seconds")
@@ -171,16 +208,11 @@ def train_and_record(
     }
     _append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
 
-    # ---- write per-step cost rows ------------------------------------
-    cost_rows = [
-        {
-            "experiment_id": experiment_id,
-            "step":          step,
-            "cost":          round(float(cst[step].item()), 8),
-        }
-        for step in range(max_steps)
-    ]
-    _append_rows(costs_csv, COSTS_FIELDS, cost_rows)
+    # ---- write per-experiment costs on a single row -------------------
+    cost_row = {"experiment_id": experiment_id, "n_steps": max_steps}
+    for step in range(max_steps):
+        cost_row[f"cost_{step}"] = round(float(cst[step].item()), 8)
+    _append_row(costs_csv, cost_fieldnames, cost_row)
 
     print(f"[tracker] Experiment {experiment_id} saved "
           f"(circuit={circuit_num}, qubits={n_qubits}, layers={layers}, "
