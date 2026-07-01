@@ -7,11 +7,12 @@ from itertools import product
 path = "results/"
 
 number_of_functions = 5
-degres = [8]
-nums = [31,32] + list(range(1, 19))
+degres = [10]
+nums = [30,31,32] + list(range(1, 19))
 layers_list = [3]
 anzats_reps_list = [1,2,3]
 qubits_list = [6]
+Max_steps = 1000
 
 
 for deg in degres:
@@ -24,5 +25,6 @@ for deg in degres:
             experiment_id, final_weights, cost_history = experiment_tracker.train_and_record(x, target_y, 
                                                                                              circuit_num=num, n_qubits=n_qubit, 
                                                                                              layers=layer, anzats_reps=anzats_reps, 
-                                                                                             path=path)
+                                                                                             path=path,
+                                                                                             max_steps=Max_steps)
     print(f"Experiment completed for degree {deg}")
