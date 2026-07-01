@@ -70,7 +70,8 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
     opt = torch.optim.Adam([weights], lr = 0.1)
     cost = cost_model(model)
     cst = torch.zeros((max_steps), dtype=torch.float32)
-    cst[0] = cost(weights, x, target_y)  # initial cost
+    with torch.no_grad():
+        cst[0] = cost(weights, x, target_y)  # initial cost
 
     def closure():
         opt.zero_grad()
@@ -79,7 +80,6 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
         return loss
     
     for step in range(max_steps):
-        
         # select batch of data using torch's random permutation
         perm = torch.randperm(len(x))
         x_batch = x[perm[:batch_size]]
@@ -90,11 +90,10 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
         opt.step(closure)
 
         # save, and possibly print, the current cost
-        c = cost(weights, x, target_y)
-        cst[step] = c
+        cst[step] = cost(weights, x, target_y).detach().item()
         if (step + 1) % display_step == 0 and display:
-            print("Cost at step {0:3}: {1}".format(step + 1, c))
-    return weights, cst
+            print("                 Cost at step {0:3}: {1}".format(step + 1, cst[step]))
+    return weights.detach(), cst
 
 
 def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit = 0):
