@@ -48,6 +48,35 @@ def _ensure_csv(path: str, fieldnames: list[str]) -> None:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
 
+def update_header(path: str, fieldnames: list[str]) -> bool:
+    _ensure_csv(path, fieldnames)
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        existing_fieldnames = reader.fieldnames or []
+    update = False
+    for field in fieldnames:
+        if field not in existing_fieldnames:
+            existing_fieldnames.append(field)
+            update = True
+    if not update:
+        return False # no update needed
+    with open(path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=existing_fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return True
+
+def pad_cost_header(path: str = "results/", n_steps: int = None) -> None:
+    """
+    Ensure the costs CSV has a header with at least `n_steps` cost columns.
+    If `n_steps` is None, it will use the maximum number of steps found in the file.
+    """
+    costs_csv = os.path.join(path, COSTS_CSV)
+    fieldnames = ["experiment_id", "n_steps"] + [f"cost_{i}" for i in range(n_steps or 0)]
+    _ensure_csv(costs_csv, fieldnames)
 
 def _append_row(path: str, fieldnames: list[str], row: dict) -> None:
     with open(path, "a", newline="") as f:
@@ -68,7 +97,6 @@ def load_experiments(experiments_csv: str = EXPERIMENTS_CSV, path: str = None):
     _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
     with open(experiments_csv, "r", newline="") as f:
         return list(csv.DictReader(f))
-
 
 def load_costs(costs_csv: str = COSTS_CSV, path: str = None):
     """

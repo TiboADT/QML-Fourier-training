@@ -4,3 +4,4 @@ archive_results/
 .venv/
 *.sh
 output.log
+*.gif
