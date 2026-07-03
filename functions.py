@@ -119,7 +119,7 @@ def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit 
         wires = list(range(n_qubits))
         circuit_to_call(weights[0], wires = wires)
         for l in range(layers):
-            S(x*(l+1))
+            S(x)
             circuit_to_call(weights[l+1], wires = wires)
 
         return qp.expval(qp.PauliZ(wires=measuring_qubit))
