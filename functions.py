@@ -69,7 +69,9 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
     weights = weights.detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([weights], lr = 0.1)
     cost = cost_model(model)
-    cst = torch.zeros((max_steps), dtype=torch.float32)
+    # cst[0] is the pre-training cost, cst[1..max_steps] the cost after each
+    # optimizer step — keeping both means neither overwrites the other.
+    cst = torch.zeros((max_steps + 1), dtype=torch.float32)
     with torch.no_grad():
         cst[0] = cost(weights, x, target_y)  # initial cost
 
@@ -78,7 +80,7 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
         loss = cost(weights, x_batch, y_batch)
         loss.backward()
         return loss
-    
+
     for step in range(max_steps):
         # select batch of data using torch's random permutation
         perm = torch.randperm(len(x))
@@ -90,9 +92,9 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
         opt.step(closure)
 
         # save, and possibly print, the current cost
-        cst[step] = cost(weights, x, target_y).detach().item()
+        cst[step + 1] = cost(weights, x, target_y).detach().item()
         if (step + 1) % display_step == 0 and display:
-            print("                 Cost at step {0:3}: {1}".format(step + 1, cst[step]))
+            print("                 Cost at step {0:3}: {1}".format(step + 1, cst[step + 1]))
     return weights.detach(), cst
 
 
@@ -151,7 +153,6 @@ def show_results(model,weights, x, target_y, cst, title="Results"):
 def function_to_learn(degree = 1, coeffs = None, coeff0 = 0.1):
     if coeffs is None:
         coeffs = np.random.random(size=degree) + 1j * np.random.random(size=degree)  # coefficients of non-zero frequencies
-    coeff0 = 0.1  # coefficient of zero frequency
     coeffs = coeffs / np.sum(np.abs(coeffs))
     coeffs = coeffs * (1 - coeff0) / 2 
 
@@ -167,6 +168,3 @@ def function_to_learn(degree = 1, coeffs = None, coeff0 = 0.1):
         return torch.real(res)
     
     return target_function
-
-def coucou():
-    print("et non en fait")

@@ -6,12 +6,9 @@ import csv
 import uuid
 import os
 from datetime import datetime
-import torch
-import functools
 
-import pennylane as qp
-
-from functions import train, show_results, build_model, get_device
+from functions import train, build_model
+from circuits import n_trainable
 
 # ------------------------------------------------------------------
 # Paths (override before importing if needed)
@@ -48,36 +45,6 @@ def _ensure_csv(path: str, fieldnames: list[str]) -> None:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
 
-def update_header(path: str, fieldnames: list[str]) -> bool:
-    _ensure_csv(path, fieldnames)
-    with open(path, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        existing_fieldnames = reader.fieldnames or []
-    update = False
-    for field in fieldnames:
-        if field not in existing_fieldnames:
-            existing_fieldnames.append(field)
-            update = True
-    if not update:
-        return False # no update needed
-    with open(path, "r", newline="") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-    with open(path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=existing_fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    return True
-
-def pad_cost_header(path: str = "results/", n_steps: int = None) -> None:
-    """
-    Ensure the costs CSV has a header with at least `n_steps` cost columns.
-    If `n_steps` is None, it will use the maximum number of steps found in the file.
-    """
-    costs_csv = os.path.join(path, COSTS_CSV)
-    fieldnames = ["experiment_id", "n_steps"] + [f"cost_{i}" for i in range(n_steps or 0)]
-    _ensure_csv(costs_csv, fieldnames)
-
 def _append_row(path: str, fieldnames: list[str], row: dict) -> None:
     with open(path, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -100,8 +67,7 @@ def load_experiments(experiments_csv: str = EXPERIMENTS_CSV, path: str = None):
 
 def load_costs(costs_csv: str = COSTS_CSV, path: str = None):
     """
-    Return cost rows. If `experiment_id` is given, filter to that run only.
-    Returns a list of dicts with keys: experiment_id, step, cost.
+    Return cost rows as a list of dicts with keys: experiment_id, n_steps, costs.
     """
     if path is not None:
         costs_csv = os.path.join(path, costs_csv)
@@ -112,38 +78,19 @@ def load_costs(costs_csv: str = COSTS_CSV, path: str = None):
         header = reader.fieldnames or []
         rows = list(reader)
 
-    # Backward-compatible parsing:
-    # - If file has 'step' and 'cost' columns, return list of {experiment_id, step, cost}
-    # - If file uses wide format cost_0, cost_1, ... return list of {experiment_id, n_steps, costs: [...]}
-    if "step" in header and "cost" in header:
-        return rows
-
-    # detect cost_* columns
-    cost_cols = [c for c in header if c.startswith("cost_")]
-    if cost_cols:
-        parsed = []
-        # sort cost columns by index
-        def idx(name):
-            try:
-                return int(name.split("_")[1])
-            except Exception:
-                return 0
-
-        cost_cols = sorted(cost_cols, key=idx)
-        for r in rows:
-            costs = []
-            for c in cost_cols:
-                v = r.get(c, "")
-                costs.append(float(v) if v != "" else None)
-            parsed.append({
-                "experiment_id": r.get("experiment_id"),
-                "n_steps": int(r.get("n_steps", len(costs))) if r.get("n_steps") else len(costs),
-                "costs": costs,
-            })
-        return parsed
-
-    # default fallback
-    return rows
+    cost_cols = sorted(
+        (c for c in header if c.startswith("cost_")),
+        key=lambda name: int(name.split("_")[1]),
+    )
+    parsed = []
+    for r in rows:
+        costs = [float(v) if (v := r.get(c, "")) != "" else None for c in cost_cols]
+        parsed.append({
+            "experiment_id": r.get("experiment_id"),
+            "n_steps": int(r.get("n_steps", len(costs))) if r.get("n_steps") else len(costs),
+            "costs": costs,
+        })
+    return parsed
 
 
 
@@ -226,7 +173,10 @@ def train_and_record(
         "n_qubits":         n_qubits,
         "layers":            layers,
         "anzats_reps":             anzats_reps,
-        "n_params":         int(weights.numel()),
+        # weight_tensor_shape allocates a rectangular tensor, but several
+        # circuits don't read all of it — count what's
+        # actually trainable rather than the raw tensor size.
+        "n_params":         layers * n_trainable(circuit_num, n_qubits, anzats_reps),
         "n_train_samples":  len(x),
         "max_steps":        max_steps,
         "batch_size":       batch_size,
@@ -237,9 +187,11 @@ def train_and_record(
     _append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
 
     # ---- write per-experiment costs on a single row -------------------
+    # cst[0] is the pre-training cost (already recorded as initial_cost above);
+    # cst[1:] holds the cost after each of the max_steps optimizer steps.
     cost_row = {"experiment_id": experiment_id, "n_steps": max_steps}
     for step in range(max_steps):
-        cost_row[f"cost_{step}"] = round(float(cst[step].item()), 8)
+        cost_row[f"cost_{step}"] = round(float(cst[step + 1].item()), 8)
     _append_row(costs_csv, cost_fieldnames, cost_row)
 
     print(f"[tracker] Experiment {experiment_id} saved "

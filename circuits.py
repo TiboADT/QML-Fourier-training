@@ -1,18 +1,5 @@
 import pennylane as qp
-
-def circuit(name : str = None, num : str = None):
-    """This function will take either the name of a circuit or it number and return a function corresponding to that circuit.
-    """
-    circuits = {
-        "SU4": 31,
-        "Brickwall": 32,
-    }
-    if num is None:
-        if name is None:
-            raise ValueError("You must provide either a circuit name or a circuit number.")
-        num = circuits[name]
-    
-    
+import torch
 
 def full_SU2(params, wires = None):
     """ 
@@ -229,18 +216,18 @@ def circuit_set(name: str = None, num: int = None):
     elif num == 7:
         def circ7(params, wires=None):
             """
-            params : (reps, num_wires, 5)  — packed params for RX-RZ and CP angles
+            params : (reps, num_wires, 6)
             """
             reps, num_wires, _ = params.shape
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
                 rx_rz_layer(params[i,:,:2], wires)
-                for q in (range(0, num_wires - 1, 2)):
-                    qp.ControlledPhaseShift(params[i, q, 4], wires=[wires[q], wires[q + 1]])
+                for q_idx, q in enumerate(range(0, num_wires - 1, 2)):
+                    qp.ControlledPhaseShift(params[i, q_idx, 4], wires=[wires[q], wires[q + 1]])
                 rx_rz_layer(params[i,:,2:4], wires)
                 for q_idx, q in enumerate(range(1, num_wires - 1, 2)):
-                    qp.ControlledPhaseShift(params[i, q_idx, 4], wires=[wires[q], wires[q + 1]])
+                    qp.ControlledPhaseShift(params[i, q_idx, 5], wires=[wires[q], wires[q + 1]])
 
         return circ7
 
@@ -249,6 +236,9 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 8:
         def circ8(params, wires=None):
+            """
+            params : (reps, num_wires, 6)
+            """
             reps, num_wires, _ = params.shape
             if wires is None:
                 wires = list(range(num_wires))
@@ -261,7 +251,7 @@ def circuit_set(name: str = None, num: int = None):
                 rx_rz_layer(params[i,:,2:4], wires)
                 for q_idx, q in enumerate(range(1, num_wires - 1, 2)):
                     qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q_idx, 4], wires=[wires[q], wires[q + 1]])
+                    qp.ControlledPhaseShift(params[i, q_idx, 5], wires=[wires[q], wires[q + 1]])
                     qp.Hadamard(wires=wires[q])
 
         return circ8
@@ -311,8 +301,9 @@ def circuit_set(name: str = None, num: int = None):
     elif num == 11:
         def circ11(params, wires=None):
             """
-            params_outer shape: (reps, num_wires, 2)   — RY+RZ on all wires
-            params_inner shape: (reps, num_wires-2, 2) — RY+RZ on inner wires (1..num_wires-2)
+            params shape: (reps, num_wires, 4)
+              [:, :, 0:2] = outer RY+RZ on all wires
+              [:, :, 2:4] = inner RY+RZ on inner wires (1..num_wires-2), independent slots
             """
             reps, num_wires, _ = params.shape
             if wires is None:
@@ -324,8 +315,8 @@ def circuit_set(name: str = None, num: int = None):
                 for q in range(0, num_wires - 1, 2):
                     qp.CNOT(wires=[wires[q], wires[q + 1]])
                 for q_idx, q in enumerate(range(1, num_wires - 1)):
-                    qp.RY(params[i, q_idx, 0], wires=wires[q])
-                    qp.RZ(params[i, q_idx, 1], wires=wires[q])
+                    qp.RY(params[i, q_idx, 2], wires=wires[q])
+                    qp.RZ(params[i, q_idx, 3], wires=wires[q])
                 for q in range(1, num_wires - 1, 2):
                     qp.CNOT(wires=[wires[q], wires[q + 1]])
 
@@ -336,6 +327,10 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 12:
         def circ12(params, wires=None):
+            """
+            params shape: (reps, num_wires, 4), same layout as circuit 11
+            (dims 2:4 independent for the inner layer).
+            """
             reps, num_wires, _ = params.shape
             if wires is None:
                 wires = list(range(num_wires))
@@ -346,8 +341,8 @@ def circuit_set(name: str = None, num: int = None):
                 for q in range(0, num_wires - 1, 2):
                     qp.CZ(wires=[wires[q], wires[q + 1]])
                 for q_idx, q in enumerate(range(1, num_wires - 1)):
-                    qp.RY(params[i, q_idx, 0], wires=wires[q])
-                    qp.RZ(params[i, q_idx, 1], wires=wires[q])
+                    qp.RY(params[i, q_idx, 2], wires=wires[q])
+                    qp.RZ(params[i, q_idx, 3], wires=wires[q])
                 for q in range(1, num_wires - 1, 2):
                     qp.CZ(wires=[wires[q], wires[q + 1]])
 
@@ -590,9 +585,9 @@ def weight_tensor_shape(num, num_wires, reps = 1):
     elif num == 6:
         return (reps, num_wires, 4 + num_wires - 1)
     elif num == 7:
-        return (reps, num_wires, 5)  # plus separate odd CP tensor
+        return (reps, num_wires, 6)
     elif num == 8:
-        return (reps, num_wires, 5)  # plus separate odd CP tensor
+        return (reps, num_wires, 6)
     elif num == 9:
         return (reps, num_wires, 1)
     elif num == 10:
@@ -621,3 +616,39 @@ def weight_tensor_shape(num, num_wires, reps = 1):
         return (reps, num_wires//2, 3, 3)
     elif num == 32:
         return (reps, num_wires, 2)
+    else:
+        raise ValueError(f"Circuit number {num} is not defined.")
+
+
+def n_trainable(num, num_wires, reps=1):
+    """Number of weight-tensor entries that circuit_set(num) actually reads.
+
+    weight_tensor_shape allocates a rectangular tensor, but several circuits
+    don't read all of it. Rather than hand-count the
+    used entries per circuit (error-prone and easy to let drift out of sync
+    with circuit_set), this measures it: differentiate a random linear
+    functional of the full output distribution w.r.t. every weight entry and
+    count the nonzero gradients. A structurally-unused entry gets an exact
+    zero gradient; a coincidental zero from a used entry has probability zero
+    under random projection weights and random input angles.
+    """
+    shape = weight_tensor_shape(num, num_wires, reps)
+    generator = torch.Generator().manual_seed(0)
+    weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64, generator=generator)
+    weights.requires_grad_(True)
+    dev = qp.device("default.qubit", wires=num_wires)
+
+    @qp.qnode(dev, interface="torch", diff_method="backprop")
+    def probe(weights):
+        circuit_set(num=num)(weights, wires=list(range(num_wires)))
+        # qp.state() (not qp.probs()) so phase-only gates (e.g. a trailing RZ)
+        # are visible too — probabilities in the computational basis are blind
+        # to them, which would falsely mark their parameters as unused.
+        return qp.state()
+
+    state = probe(weights)
+    real_projection = torch.rand(2 ** num_wires, dtype=torch.float64, generator=generator)
+    imag_projection = torch.rand(2 ** num_wires, dtype=torch.float64, generator=generator)
+    loss = state.real @ real_projection + state.imag @ imag_projection
+    loss.backward()
+    return int((weights.grad.abs() > 1e-9).sum().item())
