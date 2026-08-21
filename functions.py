@@ -6,48 +6,6 @@ import torch
 
 from circuits import circuit_set, weight_tensor_shape
 
-# ── Device setup ──────────────────────────────────────────────────────────────
-
-def get_device(verbose: bool = False) -> torch.device:
-    """
-    Return the best available device, checked in this order:
-        1. CUDA  (NVIDIA GPU)
-        2. XPU   (Intel GPU, requires intel-extension-for-pytorch)
-        3. CPU   (fallback)
-    """
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        if verbose:
-            props = torch.cuda.get_device_properties(device)
-            vram  = props.total_memory / 1024**3
-            print(f"GPU found : {props.name}  (CUDA)")
-            print(f"VRAM      : {vram:.1f} GB")
-            print(f"CUDA      : {torch.version.cuda}")
-
-    elif torch.xpu.is_available():
-        device = torch.device("xpu")
-        if verbose:
-            props = torch.xpu.get_device_properties(device)
-            vram  = props.total_memory / 1024**3
-            print(f"GPU found : {props.name}  (Intel XPU)")
-            print(f"VRAM      : {vram:.1f} GB")
-
-    else:
-        device = torch.device("cpu")
-        if verbose:
-            print("No GPU found — running on CPU (no speedup vs original script)")
-
-    return device
-
-
-def _get_vram_gb(device: torch.device) -> float:
-    """Return total VRAM in GB for a CUDA or XPU device."""
-    if device.type == "cuda":
-        return torch.cuda.get_device_properties(device).total_memory / 1024**3
-    elif device.type == "xpu":
-        return torch.xpu.get_device_properties(device).total_memory / 1024**3
-    return 0.0
-
 # ── Training and cost functions ───────────────────────────────────────────────
 
 def square_loss(targets, predictions):

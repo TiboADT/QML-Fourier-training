@@ -7,7 +7,7 @@ def full_SU2(params, wires = None):
     """
     if wires is None:
         wires = list(range(params.shape[0]))
-    num_wires, _ = params.shape
+    num_wires = params.shape[0]
     for i in range(num_wires):
         qp.Rot(*params[i], wires=wires[i])
 
@@ -15,7 +15,7 @@ def two_rotations(params, wires = None):
     """ 
     params : tenor of shape (num_wires, 2)
     """
-    num_wires, _ = params.shape
+    num_wires = params.shape[0]
     if wires is None:
         wires = list(range(num_wires))
     for i in range(num_wires):
@@ -89,7 +89,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     if num == 1:
         def circ1(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -103,7 +103,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 2:
         def circ2(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -119,7 +119,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 3:
         def circ3(params, wires=None):
-            reps, num_wires, _ = params.shape  # params: (reps, num_wires, 3)
+            reps, num_wires = params.shape[0], params.shape[1]  # params: (reps, num_wires, 3)
             # params[:, :, :2] = RX/RZ angles, params[:, :num_wires-1, 2] = CP angles
             if wires is None:
                 wires = list(range(num_wires))
@@ -135,7 +135,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 4:
         def circ4(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -159,7 +159,7 @@ def circuit_set(name: str = None, num: int = None):
             params[:, i, 2:2+(num_wires-1)]        = CP angles for qubit i to all others
             params[:, :, 2+(num_wires-1):]         = second RX-RZ block (2 angles)
             """
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             n_cp = num_wires - 1  # angles per qubit (skip self)
@@ -184,7 +184,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 6:
         def circ6(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             n_cp = num_wires - 1
@@ -218,7 +218,7 @@ def circuit_set(name: str = None, num: int = None):
             """
             params : (reps, num_wires, 6)
             """
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -239,7 +239,7 @@ def circuit_set(name: str = None, num: int = None):
             """
             params : (reps, num_wires, 6)
             """
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -262,7 +262,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 9:
         def circ9(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -281,7 +281,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 10:
         def circ10(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -305,7 +305,7 @@ def circuit_set(name: str = None, num: int = None):
               [:, :, 0:2] = outer RY+RZ on all wires
               [:, :, 2:4] = inner RY+RZ on inner wires (1..num_wires-2), independent slots
             """
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -331,7 +331,7 @@ def circuit_set(name: str = None, num: int = None):
             params shape: (reps, num_wires, 4), same layout as circuit 11
             (dims 2:4 independent for the inner layer).
             """
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -356,7 +356,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 13:
         def circ13(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -377,7 +377,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 14:
         def circ14(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -402,7 +402,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 15:
         def circ15(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -425,7 +425,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 16:
         def circ16(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -442,7 +442,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 17:
         def circ17(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -465,7 +465,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 18:
         def circ18(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -481,7 +481,7 @@ def circuit_set(name: str = None, num: int = None):
     # ------------------------------------------------------------------
     elif num == 19:
         def circ19(params, wires=None):
-            reps, num_wires, _ = params.shape
+            reps, num_wires = params.shape[0], params.shape[1]
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
@@ -515,7 +515,7 @@ def circuit_set(name: str = None, num: int = None):
             if wires is None:
                 wires = list(range(params.shape[1]*2))
             num_wires = len(wires)
-            num_layers, num_paires, _ , _ = params.shape
+            num_layers, num_paires = params.shape[0], params.shape[1]
             wires_parity = 1 - (num_wires % 2)
             #print(f"num_layers: {num_layers}, num_paires: {num_paires}, wires_parity: {wires_parity}")
             for layer in range(num_layers):
@@ -548,7 +548,7 @@ def circuit_set(name: str = None, num: int = None):
             """ 
             params : tenor of shape (num_layers, num_wires, 2)
             """
-            num_layers, num_wires, _  = params.shape
+            num_layers, num_wires = params.shape[0], params.shape[1]
 
             if wires is None:
                 wires = list(range(num_wires))
