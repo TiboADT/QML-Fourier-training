@@ -14,15 +14,14 @@ compared to the Haar reference `F/F_Haar`).
 - `functions.py`: the target Fourier functions to fit, the training loop
   (`train`), and the QNode builder (`build_model`).
 - `experiment_tracker.py`: runs `train` and appends one row per run to
-  `results/experiments.csv` (metadata) and `results/costs.csv` (cost curve).
+  `results/experiments.csv` (metadata), saving each cost curve to its own
+  `results/costs/{experiment_id}.npy`.
 - `frame_potential.py`: batched, GPU-compatible frame-potential estimation
   computed directly from `circuit_set` (see below).
 - `run.py`: CLI for both training and frame-potential estimation (`train`
-  and `frame-potential` subcommands).
-- `test.py`: the training sweep this project was originally run with (sweeps
-  circuit number x reps x qubits x target function via hardcoded constants
-  at the top of the file) — `run.py train` covers the same ground with
-  proper flags, prefer that for new runs.
+  and `frame-potential` subcommands). Retires the old `test.py` (hardcoded
+  constants, no CLI, no seeding) — `run.py train` reproduces the same sweep
+  with proper flags and best-effort seeding.
 - `notebooks/`: `building_circuits.ipynb` (circuit sanity checks),
   `Fourier.ipynb`/`training_and_saving.ipynb` (training), `post_processing.ipynb`
   (plots from `results/experiments.csv`).
@@ -50,8 +49,13 @@ train_and_record(x, y, circuit_num=7, n_qubits=6, layers=3, anzats_reps=1,
 
 Every run appends a row to `results/experiments.csv` (`n_params` is the
 number of parameters the circuit actually reads, not the raw tensor size —
-see `n_trainable` in `circuits.py`) and the per-step cost curve to
-`results/costs.csv`.
+see `n_trainable` in `circuits.py`) and saves its cost curve to
+`results/costs/{experiment_id}.npy` — one small binary file per run, so a
+run's `max_steps` never has to match any other run's, and nothing repeats
+the experiment id or step index the way a CSV would need to. Load one curve
+with `load_cost_curve(experiment_id, path=...)`, or every curve at once
+(as a list of `{experiment_id, n_steps, costs}` dicts, ready for
+`pd.DataFrame(...)`) with `load_costs(path=...)`.
 
 `layers` is the number of variational blocks; data (`x`) is only
 re-encoded *between* blocks, so `layers=1` means the model never reads `x`
