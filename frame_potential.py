@@ -286,7 +286,7 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
     if device is None:
         device = get_device()
     if n_samples is None:
-        n_samples = 2 ** n_qubits * t
+        n_samples = 2 ** n_qubits * t * 10  # heuristic starting point
 
     max_batch_size = recommended_batch_size(n_qubits, device, dtype)
     est = estimate_once(num, n_qubits, reps, t, n_samples,
