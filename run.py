@@ -162,8 +162,8 @@ def cmd_frame_potential(args):
         fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps,
                           device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
         if not args.quiet:
-            print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) " +
-                  fp.report(est, circuit_num=num, n_qubits=args.n_qubits).replace("\n", " | "))
+            print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) \n" +
+                  fp.report(est, circuit_num=num, n_qubits=args.n_qubits))
 
     print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
 
