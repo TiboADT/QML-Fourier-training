@@ -14,6 +14,16 @@ batches), and four small functions :
     estimate_until_converged    — loop estimate_once until the CI is tight enough
     report / save_estimate      — printing and persistence
 
+estimate_once and estimate_until_converged are circuit_set-specific thin
+wrappers (via `_circuit_sampler`) around the two functions the estimation
+logic actually lives in, estimate_once_from_sampler and
+estimate_until_converged_from_sampler. Those take any `sampler(batch_size,
+*, device, dtype, generator) -> Tensor[batch_size, d, d]` callable, so any
+ensemble that isn't a circuit_set architecture at all -- e.g. two_designs/'s
+random-Clifford calibration, which has no continuous parameters and no
+PennyLane gates to trace -- gets the exact same accumulation, pooling, and
+confidence-interval machinery for free.
+
 GPU: sample_unitaries builds the batch of unitaries via reshape + einsum
 axis-contraction rather than the naive kron(I, gate, I) + matmul
 approach — the latter is O(batch * d^3) per gate, this is O(batch * d^2),
@@ -33,7 +43,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 import pennylane as qp
@@ -49,11 +59,10 @@ def get_device() -> torch.device:
     return torch.device("cpu")
 
 
-def recommended_batch_size(n_qubits: int, device: torch.device,
-                            dtype: torch.dtype = torch.complex64) -> int:
+def _recommended_batch_size_for_d(d: int, device: torch.device,
+                                   dtype: torch.dtype = torch.complex64) -> int:
     """Largest N such that the (N, N, d, d) pairwise-trace tensor in
-    estimate_once fits comfortably in available memory."""
-    d = 2 ** n_qubits
+    estimate_once_from_sampler fits comfortably in available memory."""
     bytes_per_element = 8 if dtype == torch.complex64 else 16
     if device.type == "cuda":
         free_bytes, _ = torch.cuda.mem_get_info(device)
@@ -61,6 +70,11 @@ def recommended_batch_size(n_qubits: int, device: torch.device,
     else:
         usable = 4 * 1024 ** 3  # assume a 4 GB budget when running on CPU
     return max(2, int(math.sqrt(usable / (d * d * bytes_per_element))))
+
+
+def recommended_batch_size(n_qubits: int, device: torch.device,
+                            dtype: torch.dtype = torch.complex64) -> int:
+    return _recommended_batch_size_for_d(2 ** n_qubits, device, dtype)
 
 
 # ── tracing circuit_set(num) into a flat, fused gate list ─────────────────
@@ -235,25 +249,17 @@ class Estimate:
         )
 
 
-def estimate_once(num: int, n_qubits: int, reps: int, t: int, n_samples: int, *,
-                   device: Optional[torch.device] = None,
-                   dtype: torch.dtype = torch.complex64,
-                   generator: Optional[torch.Generator] = None) -> Estimate:
-    """Draw n_samples unitaries (split into two independent halves A, B) and
-    estimate F^(t) from all n_a * n_b cross pairs."""
-    if device is None:
-        device = get_device()
-    n_a = n_samples // 2
-    n_b = n_samples - n_a
-    UA = sample_unitaries(num, n_qubits, reps, n_a, device=device, dtype=dtype, generator=generator)
-    UB = sample_unitaries(num, n_qubits, reps, n_b, device=device, dtype=dtype, generator=generator)
-
+def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -> Estimate:
+    """Shared math for both estimate_once_from_sampler and the exact
+    (whole-group) path: given two independent batches of unitaries, build the
+    Estimate from all n_a * n_b cross pairs. UA, UB: (n_a, d, d) / (n_b, d, d)."""
     accum_dtype = torch.float64
     A = UA.unsqueeze(1)
     B = UB.unsqueeze(0)
     traces = torch.einsum("bipq,bjpq->bij", A.conj(), B).squeeze(1)  # (n_a, n_b)
     P = (torch.abs(traces) ** (2 * t)).to(accum_dtype)
 
+    n_a, n_b = P.shape
     total = P.sum().item()
     sum_sq = (torch.abs(traces) ** (4 * t)).to(accum_dtype).sum().item()
 
@@ -268,7 +274,93 @@ def estimate_once(num: int, n_qubits: int, reps: int, t: int, n_samples: int, *,
     variance = max(((MSA + MSB - MSE) / (n_a * n_b)).item(), 0.0)
 
     return Estimate(total=total, sum_sq=sum_sq, variance=variance,
-                     n_pairs=n_a * n_b, t=t, d=2 ** n_qubits)
+                     n_pairs=n_a * n_b, t=t, d=d)
+
+
+# A `sampler` is any callable (batch_size, *, device, dtype, generator) ->
+# Tensor[batch_size, d, d] of unitaries — sample_unitaries(num, n_qubits, reps,
+# ...) partially applied is one, but so is e.g.
+# two_designs.family_a_clifford.sample_clifford_unitaries, or any other
+# ensemble that isn't a circuit_set architecture at all. Everything below
+# this line only depends on the sampler through that interface.
+
+Sampler = Callable[..., torch.Tensor]
+
+
+def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int, *,
+                                device: Optional[torch.device] = None,
+                                dtype: torch.dtype = torch.complex64,
+                                generator: Optional[torch.Generator] = None) -> Estimate:
+    """Draw n_samples unitaries from `sampler` (split into two independent
+    halves A, B) and estimate F^(t) from all n_a * n_b cross pairs. `d` is
+    the Hilbert space dimension the sampler produces (needed for
+    Estimate.d / Estimate.haar, not inferrable from the sampler itself)."""
+    if device is None:
+        device = get_device()
+    n_a = n_samples // 2
+    n_b = n_samples - n_a
+    UA = sampler(n_a, device=device, dtype=dtype, generator=generator)
+    UB = sampler(n_b, device=device, dtype=dtype, generator=generator)
+    return _estimate_from_batches(UA, UB, t, d)
+
+
+def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
+                                           n_samples: Optional[int] = None,
+                                           rel_tol: float = 0.4,
+                                           max_batches: int = 50,
+                                           min_abs_error: float = 1e-5,
+                                           device: Optional[torch.device] = None,
+                                           dtype: torch.dtype = torch.complex64,
+                                           generator: Optional[torch.Generator] = None,
+                                           verbose: bool = False) -> Estimate:
+    """Keep pooling fresh batches (doubling n_samples each time, capped by
+    available memory) until the 95% CI is within rel_tol of |delta|, or
+    max_batches is reached."""
+    if device is None:
+        device = get_device()
+    if n_samples is None:
+        n_samples = d * t * 10  # heuristic starting point (matches d = 2**n_qubits for circuit ensembles)
+
+    max_batch_size = _recommended_batch_size_for_d(d, device, dtype)
+    est = estimate_once_from_sampler(sampler, d, t, n_samples,
+                                      device=device, dtype=dtype, generator=generator)
+
+    for i in range(max_batches):
+        target = abs(rel_tol * est.delta)
+        if est.fidelity_error <= target or est.fidelity_error <= min_abs_error:
+            break
+        if verbose:
+            print(f"  batch {i}: F={est.frame_potential:.4f} error={est.fidelity_error:.4f} "
+                  f"target={target:.4f} n_pairs={est.n_pairs}")
+        n_samples = min(n_samples * 2, max_batch_size)
+        est = est + estimate_once_from_sampler(sampler, d, t, n_samples,
+                                                device=device, dtype=dtype, generator=generator)
+
+    return est
+
+
+def _circuit_sampler(num: int, n_qubits: int, reps: int) -> Sampler:
+    """The sampler backing every circuit_set architecture: partially applies
+    sample_unitaries so it matches the generic (batch_size, *, device, dtype,
+    generator) -> Tensor interface."""
+    def sampler(batch_size, *, device=None, dtype=torch.complex64, generator=None):
+        return sample_unitaries(num, n_qubits, reps, batch_size,
+                                 device=device, dtype=dtype, generator=generator)
+    return sampler
+
+
+def estimate_once(num: int, n_qubits: int, reps: int, t: int, n_samples: int, *,
+                   device: Optional[torch.device] = None,
+                   dtype: torch.dtype = torch.complex64,
+                   generator: Optional[torch.Generator] = None) -> Estimate:
+    """Draw n_samples unitaries (split into two independent halves A, B) and
+    estimate F^(t) from all n_a * n_b cross pairs. Thin circuit_set-specific
+    wrapper around estimate_once_from_sampler — use that directly for
+    ensembles that aren't a circuit_set architecture (see two_designs/)."""
+    return estimate_once_from_sampler(
+        _circuit_sampler(num, n_qubits, reps), 2 ** n_qubits, t, n_samples,
+        device=device, dtype=dtype, generator=generator,
+    )
 
 
 def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
@@ -282,26 +374,14 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
                               verbose: bool = False) -> Estimate:
     """Keep pooling fresh batches (doubling n_samples each time, capped by
     available memory) until the 95% CI is within rel_tol of |delta|, or
-    max_batches is reached."""
-    if device is None:
-        device = get_device()
-    if n_samples is None:
-        n_samples = 2 ** n_qubits * t * 10  # heuristic starting point
-
-    max_batch_size = recommended_batch_size(n_qubits, device, dtype)
-    est = estimate_once(num, n_qubits, reps, t, n_samples,
-                         device=device, dtype=dtype, generator=generator)
-
-    for i in range(max_batches):
-        target = abs(rel_tol * est.delta)
-        if est.fidelity_error <= target or est.fidelity_error <= min_abs_error:
-            break
-        if verbose:
-            print(f"  batch {i}: F={est.frame_potential:.4f} error={est.fidelity_error:.4f} "
-                  f"target={target:.4f} n_pairs={est.n_pairs}")
-        n_samples = min(n_samples * 2, max_batch_size)
-        est = est + estimate_once(num, n_qubits, reps, t, n_samples,
-                                   device=device, dtype=dtype, generator=generator)
+    max_batches is reached. Thin circuit_set-specific wrapper around
+    estimate_until_converged_from_sampler."""
+    return estimate_until_converged_from_sampler(
+        _circuit_sampler(num, n_qubits, reps), 2 ** n_qubits, t,
+        n_samples=n_samples, rel_tol=rel_tol, max_batches=max_batches,
+        min_abs_error=min_abs_error, device=device, dtype=dtype,
+        generator=generator, verbose=verbose,
+    )
 
     return est
 

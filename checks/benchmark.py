@@ -1,9 +1,9 @@
 """
 Benchmarks for Circuits_training. Run from the repo root:
- 
-    python benchmark.py                # everything available
-    python benchmark.py --only fp      # frame-potential only
-    python benchmark.py --only train   # training only
+
+    python check.py benchmark                # everything available
+    python check.py benchmark --only fp      # frame-potential only
+    python check.py benchmark --only train   # training only
 """
  
 import argparse
@@ -194,10 +194,10 @@ def bench_devices():
             print(f"  {dev_name:<18} failed ({str(e)[:45]})")
  
  
-def main():
+def main(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--only", choices=["fp", "train"], default=None)
-    args = p.parse_args()
+    args = p.parse_args(argv)
  
     print(f"torch {torch.__version__} | CUDA available: {torch.cuda.is_available()}"
           + (f" | {torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else ""))

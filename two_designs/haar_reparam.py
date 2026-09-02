@@ -69,7 +69,7 @@ t = 1, 2, 3 to within Monte Carlo error.
 
 Regenerating the tables
 ------------------------
-    python haar_reparam.py --build [--n-samples 50000]
+    python two_designs/haar_reparam.py --build [--n-samples 50000]
 
 writes kak1_rosenblatt_tables.npz next to this file. A table is checked
 into the repo so this is only needed if you want higher resolution or a
@@ -95,7 +95,7 @@ def _load_tables(device=None, dtype=torch.float64):
         return _cache[key]
     if not os.path.exists(_TABLE_PATH):
         raise FileNotFoundError(
-            f"{_TABLE_PATH} not found. Run `python haar_reparam.py --build` "
+            f"{_TABLE_PATH} not found. Run `python two_designs/haar_reparam.py --build` "
             "once to generate it (takes a few minutes)."
         )
     npz = np.load(_TABLE_PATH)

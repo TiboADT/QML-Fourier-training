@@ -1,7 +1,7 @@
 import pennylane as qp
 import torch
 
-import haar_reparam
+from two_designs import haar_reparam
 
 def full_SU2(params, wires = None):
     """ 
