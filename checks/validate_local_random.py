@@ -101,7 +101,8 @@ def check_convergence_pathology(n_qubits=2, t=2, rel_tol=0.3, max_batches=50):
     print()
 
 
-def main():
+def main(argv=None):
+    del argv  # no flags of its own -- accepted for a uniform call signature, see checks/validate.py
     check_single_block()
     check_brickwork_depth()
     check_convergence_pathology()

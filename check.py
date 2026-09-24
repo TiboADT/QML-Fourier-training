@@ -8,10 +8,14 @@ Examples
 --------
     python check.py benchmark                     # timing benchmarks (everything)
     python check.py benchmark --only fp           # timing benchmarks (frame potential only)
+    python check.py benchmark --only stress       # frame potential at higher n_qubits, on GPU if present
     python check.py validate                      # every two_designs calibration check
     python check.py validate --only clifford      # just the Clifford-group one
     python check.py validate --only a             # same thing, short alias
     python check.py validate --only local-random  # just the local-random-circuit one
+    python check.py validate --only connectivity  # just the connectivity-range sweep
+    python check.py show 34 --n-qubits 6 --reps 2 # draw a circuit_set architecture
+    python check.py show connectivity             # draw one range-connectivity realization
 
 Run `python check.py validate --only <anything>` with a bad value, or
 `python check.py validate -h`, to see the full list of valid checks and
@@ -23,7 +27,7 @@ import argparse
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["benchmark", "validate"])
+    p.add_argument("command", choices=["benchmark", "validate", "show"])
     p.add_argument("rest", nargs=argparse.REMAINDER,
                     help="remaining arguments, passed through to the chosen command's own CLI")
     args = p.parse_args()
@@ -34,6 +38,9 @@ def main():
     elif args.command == "validate":
         from checks.validate import main as validate_main
         validate_main(args.rest)
+    elif args.command == "show":
+        from checks.show import main as show_main
+        show_main(args.rest)
 
 
 if __name__ == "__main__":

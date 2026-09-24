@@ -4,6 +4,19 @@ Benchmarks for Circuits_training. Run from the repo root:
     python check.py benchmark                # everything available
     python check.py benchmark --only fp      # frame-potential only
     python check.py benchmark --only train   # training only
+    python check.py benchmark --only stress  # frame potential at higher n_qubits + convergence time
+
+`stress` is deliberately separate from `fp`: `fp` is a quick regression
+check (small, fixed sizes, every device, run as part of the default
+everything-sweep); `stress` is for deciding how far a *specific* machine
+can actually push n_qubits, so it isn't part of the default sweep and
+defaults to the single best available device rather than looping cpu+cuda
+(cpu at n_qubits=12+ would just time out for no information gained -- pass
+--device cpu explicitly for a comparison point).
+
+    python check.py benchmark --only stress --device cuda
+    python check.py benchmark --only stress --n-qubits 8 10 12 14
+    python check.py benchmark --only stress --circuits 1 18 34 --reps 2
 """
  
 import argparse
@@ -90,6 +103,77 @@ def bench_sample_unitaries(device):
             print(f"{num:>8} {reps:>5} {N:>6}   failed: {str(e)[:40]}")
  
  
+# ── 2b. frame potential: how far does this machine actually reach ─────────
+
+def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2):
+    """End-to-end cost at scale: sample_unitaries throughput, one fixed-size
+    estimate_once batch, and a full estimate_until_converged run, all at
+    the SAME n_qubits -- so you can see where the unitary-construction cost
+    (O(batch*d^2) per gate, see frame_potential.apply_embedded_gate) starts
+    dominating versus where it's the pairwise-trace step (O(N^2*d^2), see
+    bench_frame_potential above) or just the number of batches the
+    convergence loop needs. `recommended_batch_size` caps every batch to
+    what should fit in memory; a size that still OOMs is itself useful
+    information (reported, not treated as an error) about where the actual
+    ceiling on this machine is versus what the heuristic predicts.
+    """
+    header(f"2b. Frame-potential stress test — scaling with n_qubits   [{device}]")
+    import frame_potential as fp
+
+    if n_qubits_list is None:
+        n_qubits_list = [8, 10, 12]
+    if circuits is None:
+        circuits = [1, 18]  # cheap (no entangling gates) vs. expensive (all-to-all CZ)
+
+    print(f"{'circuit':>7} {'n_qubits':>9} {'d':>7} {'batch_cap':>10} "
+          f"{'sample_U':>10} {'estimate_once':>14} {'converged':>11} "
+          f"{'n_pairs':>12} {'fid_err':>9}")
+
+    for num in circuits:
+        for n_qubits in n_qubits_list:
+            d = 2 ** n_qubits
+            row = f"{num:>7} {n_qubits:>9} {d:>7}"
+            try:
+                max_batch = fp.recommended_batch_size(n_qubits, device)
+            except Exception as e:
+                print(f"{row}   recommended_batch_size failed: {str(e)[:40]}")
+                continue
+            row += f" {max_batch:>10}"
+
+            try:
+                sample_batch = max(2, min(32, max_batch))
+                t_sample = timeit(
+                    lambda: fp.sample_unitaries(num, n_qubits, reps, sample_batch, device=device),
+                    repeats=1, warmup=1,
+                )
+                row += f" {t_sample*1000:>9.1f}ms"
+            except RuntimeError as e:
+                print(f"{row}   sample_unitaries OOM/failed: {str(e)[:40]}")
+                continue
+
+            try:
+                n_samples_once = max(4, min(4 * d, max_batch))
+                t0 = time.perf_counter()
+                fp.estimate_once(num, n_qubits, reps, t, n_samples_once, device=device)
+                t_once = time.perf_counter() - t0
+                row += f" {t_once:>13.2f}s"
+            except RuntimeError as e:
+                print(f"{row}   estimate_once OOM/failed: {str(e)[:40]}")
+                print(row)
+                continue
+
+            try:
+                t0 = time.perf_counter()
+                est = fp.estimate_until_converged(num, n_qubits, reps, t, device=device)
+                t_conv = time.perf_counter() - t0
+                row += f" {t_conv:>10.2f}s {est.n_pairs:>12,} {est.fidelity_error:>9.4f}"
+            except RuntimeError as e:
+                row += f"   estimate_until_converged OOM/failed: {str(e)[:40]}"
+
+            print(row)
+    print()
+
+
 # ── 3. training ─────────────────────────────────────────────────────────────
  
 def bench_square_loss():
@@ -196,25 +280,40 @@ def bench_devices():
  
 def main(argv=None):
     p = argparse.ArgumentParser()
-    p.add_argument("--only", choices=["fp", "train"], default=None)
+    p.add_argument("--only", choices=["fp", "train", "stress"], default=None)
+    p.add_argument("--n-qubits", type=int, nargs="+", default=None,
+                    help="stress only: n_qubits values to sweep (default: 8 10 12)")
+    p.add_argument("--circuits", type=int, nargs="+", default=None,
+                    help="stress only: circuit_set numbers to sweep (default: 1 18)")
+    p.add_argument("--reps", type=int, default=1, help="stress only")
+    p.add_argument("--t", type=int, default=2, help="stress only")
+    p.add_argument("--device", choices=["cpu", "cuda"], default=None,
+                    help="stress only: default is the single best available device "
+                         "(cuda if present), not cpu+cuda both -- pass this to force one")
     args = p.parse_args(argv)
- 
+
     print(f"torch {torch.__version__} | CUDA available: {torch.cuda.is_available()}"
           + (f" | {torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else ""))
     print(f"threads: {torch.get_num_threads()}")
- 
+
     devices = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
- 
+
     if args.only in (None, "fp"):
         for d in devices:
             bench_frame_potential(torch.device(d))
         bench_sample_unitaries(torch.device(devices[-1]))
- 
+
+    if args.only == "stress":
+        import frame_potential as fp
+        device = torch.device(args.device) if args.device else fp.get_device()
+        bench_stress(device, n_qubits_list=args.n_qubits, circuits=args.circuits,
+                     reps=args.reps, t=args.t)
+
     if args.only in (None, "train"):
         bench_square_loss()
         bench_training_step(devices)
         bench_devices()
- 
+
     print("\nDone.")
  
  

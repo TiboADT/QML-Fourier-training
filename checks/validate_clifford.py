@@ -94,7 +94,8 @@ def check_sampled(n_qubits: int, n_samples: int, ts=(1, 2, 3)):
     print()
 
 
-def main():
+def main(argv=None):
+    del argv  # no flags of its own -- accepted for a uniform call signature, see checks/validate.py
     check_exact(1)
     check_exact(2)
     check_sampled(4, n_samples=4000)

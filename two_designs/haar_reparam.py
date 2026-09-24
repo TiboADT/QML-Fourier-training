@@ -186,6 +186,95 @@ def euler_angles(u_alpha: torch.Tensor, u_beta: torch.Tensor, u_gamma: torch.Ten
     return alpha, beta, gamma
 
 
+# ── direct (PennyLane-free) matrix construction ────────────────────────────
+#
+# circuits.py's kak1_haar_block builds the same block by queuing PennyLane
+# operations, which is the right thing to do when you want ONE trace applied
+# to a big batch (frame_potential.sample_unitaries's whole design). It is
+# the wrong thing when a caller needs MANY small, differently-wired
+# constructions -- e.g. two_designs/range_connectivity.py, which draws a
+# fresh 2-qubit gate embedding per wire pair per layer per wiring instance:
+# retracing circuits.py's PennyLane queue on every one of those calls turned
+# out to dominate runtime completely (a few thousand retraces of a tiny
+# circuit costs far more than the circuit itself). kak1_block_matrix below
+# is the same math -- same gate sequence, same GlobalPhase(-pi/4) det
+# correction -- reimplemented as direct batched torch matrix construction,
+# with no PennyLane tracing at all. Verified to agree with
+# frame_potential.sample_unitaries(33, ...) (which goes through circuits.py
+# and PennyLane) to machine precision -- see two_designs/range_connectivity.py's
+# module docstring / the design session's own checks for how.
+
+def _rz_matrix(theta: torch.Tensor) -> torch.Tensor:
+    """theta: (...,) real -> (..., 2, 2) complex128."""
+    half = (theta / 2).to(torch.complex128)
+    e_neg, e_pos = torch.exp(-1j * half), torch.exp(1j * half)
+    zero = torch.zeros_like(e_neg)
+    return torch.stack([torch.stack([e_neg, zero], dim=-1),
+                         torch.stack([zero, e_pos], dim=-1)], dim=-2)
+
+
+def _ry_matrix(theta: torch.Tensor) -> torch.Tensor:
+    """theta: (...,) real -> (..., 2, 2) complex128."""
+    half = theta / 2
+    c, s = torch.cos(half).to(torch.complex128), torch.sin(half).to(torch.complex128)
+    return torch.stack([torch.stack([c, -s], dim=-1),
+                         torch.stack([s, c], dim=-1)], dim=-2)
+
+
+def _embed_q0(a: torch.Tensor) -> torch.Tensor:
+    """kron(a, I2): a acting on qubit 0 of a 2-qubit pair. a: (B,2,2) -> (B,4,4)."""
+    B = a.shape[0]
+    out = torch.zeros(B, 4, 4, dtype=a.dtype, device=a.device)
+    eye2 = torch.eye(2, dtype=a.dtype, device=a.device)
+    for i in range(2):
+        for j in range(2):
+            out[:, 2 * i:2 * i + 2, 2 * j:2 * j + 2] = a[:, i, j].reshape(B, 1, 1) * eye2
+    return out
+
+
+def _embed_q1(b: torch.Tensor) -> torch.Tensor:
+    """kron(I2, b): b acting on qubit 1 of a 2-qubit pair. b: (B,2,2) -> (B,4,4)."""
+    B = b.shape[0]
+    out = torch.zeros(B, 4, 4, dtype=b.dtype, device=b.device)
+    out[:, 0:2, 0:2] = b
+    out[:, 2:4, 2:4] = b
+    return out
+
+
+_CNOT_Q0Q1 = torch.tensor([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0]], dtype=torch.complex128)
+_CNOT_Q1Q0 = torch.tensor([[1, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [0, 1, 0, 0]], dtype=torch.complex128)
+
+
+def kak1_block_matrix(raw15: torch.Tensor) -> torch.Tensor:
+    """raw15: (15, B) tensor, entries Uniform(0, 2*pi) -- same convention and
+    layout as circuits.py's kak1_haar_block (and what
+    frame_potential.sample_unitaries(33, ...) draws internally). Returns
+    the (B, 4, 4) complex128 unitary directly -- see the block comment
+    above for why this exists alongside the PennyLane version."""
+    device = raw15.device
+    u = raw15.to(torch.float64) / (2 * torch.pi)
+
+    def local_su2(u3):
+        alpha, beta, gamma = euler_angles(u3[0], u3[1], u3[2])
+        return _rz_matrix(gamma) @ _ry_matrix(beta) @ _rz_matrix(alpha)
+
+    A1, A0 = local_su2(u[0:3]), local_su2(u[3:6])
+    tz, ty1, ty2 = sample_canonical(u[6], u[7], u[8])
+    B1, B0 = local_su2(u[9:12]), local_su2(u[12:15])
+
+    cnot01 = _CNOT_Q0Q1.to(device=device).expand(u.shape[1], 4, 4)
+    cnot10 = _CNOT_Q1Q0.to(device=device).expand(u.shape[1], 4, 4)
+    core = cnot01
+    core = _embed_q1(_rz_matrix(tz)) @ core
+    core = _embed_q0(_ry_matrix(ty1)) @ core
+    core = cnot10 @ core
+    core = _embed_q0(_ry_matrix(ty2)) @ core
+    core = cnot01 @ core
+    core = core * torch.exp(1j * torch.tensor(torch.pi / 4, dtype=torch.complex128))
+
+    return _embed_q0(B1) @ _embed_q1(B0) @ core @ _embed_q0(A1) @ _embed_q1(A0)
+
+
 # ── offline table builder ──────────────────────────────────────────────────
 
 def _core_matrix_np(tz, ty1, ty2):

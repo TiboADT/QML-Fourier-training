@@ -257,6 +257,59 @@ sample size chasing noise. That's a real property of the relative-tolerance
 stopping rule, worth knowing about for any near-exact-design ensemble, not
 specific to Cliffords.
 
+**Range-limited connectivity** (`two_designs/range_connectivity.py`) —
+same exact-Haar KAK1 block as circuits 33/34, same gate count, but each
+layer wires up a *fresh random* pairing of qubits instead of circuit 34's
+fixed nearest-neighbour brickwork, restricted to pairs at most `max_range`
+apart on a line of qubits (`|i - j| <= max_range`). `max_range = 1` is
+local in the same style as circuit 34 (independently randomized per layer
+rather than circuit 34's fixed alternating pattern — see
+`random_matching`'s docstring); `max_range >= n_qubits - 1` removes the
+restriction entirely, so any pair can be wired together ("permuted
+brickwork" in the design notes) — connectivity as an axis independent of
+gate count, which is the whole point.
+
+The wiring has to vary *per sample*, which a `circuit_set` architecture has
+no room for (one gate sequence traced once, then batch-applied with random
+angles — see `frame_potential.sample_unitaries`). Retracing circuits.py's
+PennyLane queue per sample turned out to dominate runtime completely once
+measured, so `sample_range_connected_unitaries` instead calls
+`haar_reparam.kak1_block_matrix` — a direct, PennyLane-free reimplementation
+of circuit 33's exact math (verified against `qml.matrix()` to machine
+precision) — and embeds it at each drawn wire pair via
+`frame_potential.apply_embedded_gate` (promoted from a `circuit_set`-internal
+helper to a shared utility for exactly this reason).
+
+```bash
+python check.py validate --only connectivity   # or: --only c
+```
+
+Unlike the other two checks, this one isn't a pass/fail calibration — it's
+a comparison tool, since the entire point is *how* the approach to Haar
+depends on connectivity range, not whether it eventually gets there. Its
+`main` prints a sweep table: `F^(t)/Haar` ratio for every
+`(max_range, reps)` combination at matched gate count, e.g. at `n_qubits=6`:
+
+```
+reps        range<=1      range<=3      range<=5
+2             2.6081        1.9871        1.1129
+4             1.7103        1.0394        1.0047
+8             1.1946        0.9971        0.9978
+```
+
+Reading a column down shows the gain from more depth at fixed range;
+reading a row across shows the gain from more reach at fixed depth — here,
+`range<=1` at `reps=8` (ratio 1.19) is still further from Haar than
+`range<=3` reaches at half the depth, `reps=4` (ratio 1.04), reproducing
+the design notes' claim that letting gates reach further matters as much
+as adding more of them at fixed gate count. Customize the sweep — it
+forwards extra arguments straight to `checks/validate_connectivity.py`'s
+own `argparse` parser:
+
+```bash
+python check.py validate --only c --n-qubits 8 --reps 2 4 8 16 --ranges 1 2 4 7 --n-samples 3000
+```
+
 ## Checks
 
 `check.py` is a second, separate CLI from `run.py` — deliberately: `run.py`
@@ -266,26 +319,47 @@ performance scripts that just print a report. Mirrors `run.py`'s own
 subcommand style:
 
 ```bash
-python check.py benchmark                     # timing benchmarks (everything)
-python check.py benchmark --only fp           # timing benchmarks, frame-potential only
-python check.py validate                      # every two_designs calibration check
-python check.py validate --only clifford      # just one, by explicit name...
-python check.py validate --only a             # ...or by short alias, either works
-python check.py validate --only local-random  # the other one (alias: b)
+python check.py benchmark                       # timing benchmarks (everything)
+python check.py benchmark --only fp             # timing benchmarks, frame-potential only
+python check.py benchmark --only stress         # frame potential at higher n_qubits + convergence time
+python check.py validate                        # every two_designs calibration check
+python check.py validate --only clifford        # just one, by explicit name...
+python check.py validate --only a               # ...or by short alias, either works
+python check.py validate --only local-random    # another one (alias: b)
+python check.py validate --only connectivity    # another one (alias: c) -- extra args
+python check.py validate --only c --n-qubits 8  # forward straight to its own CLI
+```
+
+**`benchmark --only stress`** is separate from `--only fp` on purpose: `fp`
+is a quick, fixed-size regression check run on every available device as
+part of the default everything-sweep; `stress` is for finding out how far
+*this* machine actually reaches — higher `n_qubits`, and full
+`estimate_once`/`estimate_until_converged` timing (not just the pairwise-trace
+microbenchmark `fp` covers), on a single device (CUDA if available, not
+cpu+cuda both — cpu at n_qubits >= 12 would just time out for no
+information gained). Batch sizes are capped by
+`frame_potential.recommended_batch_size` the same way production code is; a
+size that heuristic predicts should fit but still OOMs is reported, not
+treated as an error — that's exactly the information this is for.
+
+```bash
+python check.py benchmark --only stress --device cuda
+python check.py benchmark --only stress --n-qubits 8 10 12 14
+python check.py benchmark --only stress --circuits 1 18 34 --reps 2
 ```
 
 `validate`'s checks are registered in `checks/validate.py`'s `CHECKS` list,
 each with an explicit `name` (used everywhere in output and docs) and a
-tuple of `aliases` it can also be called by — short letters like `a`/`b` are
-there purely for fast typing, never used as the ensemble's actual identity
-in code, file names, or documentation (the design notes this project builds
-on label these "Family A", "Family B", etc.; that labeling is cross-referenced
-once in each module's docstring for anyone going back to the source, but
-isn't used as an identifier anywhere in this repo — `--only a` is offered as
-a convenience alias precisely so the terse form stays available without
-making it the primary name). Add a new one by writing
-`checks/validate_something.py` with a `main()`, then adding one entry to
-`CHECKS`.
+tuple of `aliases` it can also be called by — short letters like `a`/`b`/`c`
+are there purely for fast typing, never used as the ensemble's actual
+identity in code, file names, or documentation (the design notes this
+project builds on label these "Family A", "Family B", "Family C"; that
+labeling is cross-referenced once in each module's docstring for anyone
+going back to the source, but isn't used as an identifier anywhere in this
+repo — `--only a` is offered as a convenience alias precisely so the terse
+form stays available without making it the primary name). Add a new one by
+writing `checks/validate_something.py` with a `main(argv=None)`, then
+adding one entry to `CHECKS`.
 
 **On `estimate_until_converged`'s relative-tolerance stopping rule:** the
 Clifford-group and local-random checks hit the same failure mode
@@ -303,12 +377,15 @@ sample count instead — the right tool whenever you already expect
 `delta ≈ 0`, since there's no target to converge *towards*, just a spread
 to report.
 
-Both `check.py benchmark` and `check.py validate` forward their trailing
-arguments straight to `checks/benchmark.py`'s / `checks/validate.py`'s own
-`argparse` parsers — add an entirely new top-level command (as opposed to a
-new ensemble under `validate`) by writing `checks/your_command.py` with a
-`main()` (optionally taking `argv=None` if it wants its own flags), then
-adding one `elif` in `check.py`.
+`check.py benchmark`/`check.py validate` forward their trailing arguments
+straight to `checks/benchmark.py`'s / `checks/validate.py`'s own `argparse`
+parsers, and `validate` forwards a second time when `--only` picks a
+specific check with flags of its own (`checks/validate_connectivity.py`'s
+`--n-qubits`/`--reps`/`--ranges`/etc., via `parse_known_args` — anything
+`--only` itself doesn't recognize is passed straight through). Add an
+entirely new top-level command (as opposed to a new ensemble under
+`validate`) by writing `checks/your_command.py` with a `main(argv=None)`,
+then adding one `elif` in `check.py`.
 
 `check.py` lives at the repo root for the same reason `run.py` does:
 running `python check.py ...` puts the repo root on `sys.path`
@@ -317,6 +394,33 @@ automatically (Python does this for whatever file you invoke directly), so
 ...` without needing `python -m` or manual `sys.path` edits — which is also
 why none of these are runnable as `python -m checks.validate_clifford`
 anymore; go through `check.py` instead.
+
+**`check.py show`** (`checks/show.py`) answers "what circuit am I actually
+testing" directly, rather than requiring a read through `circuits.py` or
+`two_designs/range_connectivity.py`'s source. Two targets:
+
+```bash
+python check.py show 34 --n-qubits 6 --reps 2                        # any circuit_set number
+python check.py show connectivity --n-qubits 5 --reps 3 --max-range 1 --seed 42
+```
+
+A `circuit_set` number (any of 1–36, retroactively — they're already built
+from real PennyLane operations, so `qml.draw` already knows how to render
+them) prints the weight-tensor shape plus the full ASCII gate diagram.
+`connectivity` is the one case that needs its own path:
+`two_designs/range_connectivity.py`'s fast sampler deliberately never
+builds a PennyLane circuit at all (see "Range-limited connectivity" above
+— that retracing was the exact performance bug fixed last session), so
+there's no existing object to draw. `draw_display_circuit` is a second,
+display-only builder — never called from the sampler — that draws one
+concrete wiring plus one concrete set of gate angles (both reproducible via
+`--seed`) and queues real `kak1_haar_block` calls for it. Its output prints
+the wiring in plain text first (which pairs connect in which layer, and
+which qubits sit idle that layer), then the matching ASCII diagram, so the
+connectivity pattern doesn't have to be reverse-engineered from the
+diagram's wire lines. Not covered: the Clifford-group ensemble — it's a
+`stim` stabilizer tableau, not a gate sequence; `stim.Tableau.to_circuit()`
+is the right tool if you want to look inside one instead.
 
 Every run appends to the CSV rather than overwriting it, so a sweep can be
 resumed or extended across sessions by pointing `--out` at the same file.

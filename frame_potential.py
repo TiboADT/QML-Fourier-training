@@ -94,7 +94,7 @@ def _trace_operations(num, n_qubits, weights):
 def _fused_gate_list(operations, dtype, device):
     """Merge consecutive single-qubit gates on the same wire into one
     matrix (cheap, O(batch) per merge) so the full-tensor contraction in
-    _apply_gate runs once per fused block instead of once per raw gate."""
+    apply_embedded_gate runs once per fused block instead of once per raw gate."""
     pending = {}
     fused = []
 
@@ -127,12 +127,19 @@ def _fused_gate_list(operations, dtype, device):
 
 # ── batched unitary contraction ────────────────────────────────────────
 
-def _apply_gate(U: torch.Tensor, G: torch.Tensor, wires: tuple, n_qubits: int) -> torch.Tensor:
+def apply_embedded_gate(U: torch.Tensor, G: torch.Tensor, wires: tuple, n_qubits: int) -> torch.Tensor:
     """Apply gate matrix G (2^k, 2^k) or (batch, 2^k, 2^k) to `wires` of the
     batched unitary U (batch, d, d), in place of a full kron(I, G, I) + matmul.
     Reshapes U's row-index into one axis per qubit, moves the target axes to
     the front, contracts, and moves them back — O(batch * d^2) instead of
     O(batch * d^3) per gate, since only the touched axes are ever expanded.
+
+    Public (not circuit_set-specific) because it's exactly what's needed to
+    embed a gate at an arbitrary, per-call-chosen pair of wires -- e.g.
+    two_designs/range_connectivity.py builds each layer's unitary by
+    embedding fresh circuit-33 (KAK1 Haar block) samples at a randomly drawn
+    wire pair, one call per pair, rather than a fixed circuit_set gate
+    sequence.
     """
     B, d, _ = U.shape
     k = len(wires)
@@ -176,7 +183,7 @@ def sample_unitaries(num: int, n_qubits: int, reps: int, batch_size: int, *,
     d = 2 ** n_qubits
     U = torch.eye(d, dtype=dtype, device=device).expand(batch_size, d, d).clone()
     for wires, G in fused:
-        U = _apply_gate(U, G, wires, n_qubits)
+        U = apply_embedded_gate(U, G, wires, n_qubits)
     return U
 
 
@@ -382,8 +389,6 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
         min_abs_error=min_abs_error, device=device, dtype=dtype,
         generator=generator, verbose=verbose,
     )
-
-    return est
 
 
 def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None) -> str:
