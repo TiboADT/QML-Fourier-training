@@ -86,18 +86,16 @@ def check_convergence_pathology(n_qubits=2, t=2, rel_tol=0.3, max_batches=50):
     elapsed = time.time() - t0
     target = abs(rel_tol * est.delta)
     converged = est.fidelity_error <= target or est.fidelity_error <= 1e-5
-    print(f"  F={est.frame_potential:.4f}  delta={est.delta:+.4f}  "
-          f"fidelity_error={est.fidelity_error:.4f}  target={target:.4f}")
-    print(f"  n_pairs={est.n_pairs:,}  elapsed={elapsed:.1f}s")
-    if converged:
-        print("  -> stopped because its own criterion was satisfied.")
-    else:
-        print("  -> hit max_batches WITHOUT satisfying its own criterion "
-              "(same failure mode as the Clifford ensemble in validate_clifford.py: "
-              "delta is small, so the relative target shrinks about as fast as the "
-              "achievable precision). Use estimate_once with a fixed sample count "
-              "instead for a near-exact-design ensemble like this one -- "
-              "see check_single_block above.")
+    within_ci = abs(est.delta) <= max(est.fidelity_error, 1e-9)
+    print(f"  t={t}  F={est.frame_potential:.4f}  Haar={est.haar:.1f}  delta={est.delta:+.4f}  "
+          f"95% CI +/-{est.fidelity_error:.4f}  "
+          f"[{'converged' if converged else 'not converged'}] [{'within CI' if within_ci else 'outside CI'}]")
+    print(f"  n_pairs={est.n_pairs:,}  elapsed={elapsed:.1f}s  target={target:.4f}")
+    if not converged:
+        print("  (expected here: delta is small by construction, so the relative stopping "
+              "target shrinks about as fast as achievable precision -- same failure mode as "
+              "the Clifford ensemble. Use estimate_once with a fixed sample count instead; "
+              "see check_single_block above.)")
     print()
 
 

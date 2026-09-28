@@ -61,15 +61,24 @@ def get_device() -> torch.device:
 
 def _recommended_batch_size_for_d(d: int, device: torch.device,
                                    dtype: torch.dtype = torch.complex64) -> int:
-    """Largest N such that the (N, N, d, d) pairwise-trace tensor in
-    estimate_once_from_sampler fits comfortably in available memory."""
+    """Largest N such that _estimate_from_batches's peak memory -- two
+    (N, d^2) reshaped batches plus the (N, N) GEMM output, peak = 2*N*d^2*bpe
+    + N^2*bpe -- fits comfortably in available memory. Solved as a quadratic
+    in N (same formula checks/benchmark.py's bench_frame_potential prints as
+    "GEMM N"), not the sqrt(usable / d^2) estimate this used before
+    _estimate_from_batches was switched from an einsum broadcast (which
+    actually materialized an (N, N, d, d) intermediate, O(N^2*d^2) memory)
+    to that GEMM -- the old formula is still a valid cap for that older,
+    much more memory-hungry path, just needlessly conservative for this one."""
     bytes_per_element = 8 if dtype == torch.complex64 else 16
     if device.type == "cuda":
         free_bytes, _ = torch.cuda.mem_get_info(device)
         usable = free_bytes * 0.5
     else:
         usable = 4 * 1024 ** 3  # assume a 4 GB budget when running on CPU
-    return max(2, int(math.sqrt(usable / (d * d * bytes_per_element))))
+    a, b = bytes_per_element, 2 * d * d * bytes_per_element
+    n = (-b + math.sqrt(b * b + 4 * a * usable)) / (2 * a)
+    return max(2, int(n))
 
 
 def recommended_batch_size(n_qubits: int, device: torch.device,
@@ -259,14 +268,21 @@ class Estimate:
 def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -> Estimate:
     """Shared math for both estimate_once_from_sampler and the exact
     (whole-group) path: given two independent batches of unitaries, build the
-    Estimate from all n_a * n_b cross pairs. UA, UB: (n_a, d, d) / (n_b, d, d)."""
+    Estimate from all n_a * n_b cross pairs. UA, UB: (n_a, d, d) / (n_b, d, d).
+
+    traces[i, j] = Tr(UA_i^dagger UB_j), via a GEMM on the flattened (d^2,)
+    unitaries rather than broadcasting both batch dims against each other
+    before contracting: that broadcast form (an einsum this used previously)
+    materializes an (n_a, n_b, d, d) intermediate -- O(n_a*n_b*d^2) memory --
+    where this is the identical contraction reshaped into one matmul,
+    O(n_a*d^2 + n_b*d^2 + n_a*n_b) memory. See checks/benchmark.py's
+    bench_frame_potential, which times and numerically verifies the two
+    against each other."""
     accum_dtype = torch.float64
-    A = UA.unsqueeze(1)
-    B = UB.unsqueeze(0)
-    traces = torch.einsum("bipq,bjpq->bij", A.conj(), B).squeeze(1)  # (n_a, n_b)
+    n_a, n_b = UA.shape[0], UB.shape[0]
+    traces = UA.reshape(n_a, -1).conj() @ UB.reshape(n_b, -1).T  # (n_a, n_b)
     P = (torch.abs(traces) ** (2 * t)).to(accum_dtype)
 
-    n_a, n_b = P.shape
     total = P.sum().item()
     sum_sq = (torch.abs(traces) ** (4 * t)).to(accum_dtype).sum().item()
 
@@ -294,6 +310,10 @@ def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -
 Sampler = Callable[..., torch.Tensor]
 
 
+def _is_oom(exc: RuntimeError) -> bool:
+    return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
+
+
 def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int, *,
                                 device: Optional[torch.device] = None,
                                 dtype: torch.dtype = torch.complex64,
@@ -301,14 +321,41 @@ def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int,
     """Draw n_samples unitaries from `sampler` (split into two independent
     halves A, B) and estimate F^(t) from all n_a * n_b cross pairs. `d` is
     the Hilbert space dimension the sampler produces (needed for
-    Estimate.d / Estimate.haar, not inferrable from the sampler itself)."""
+    Estimate.d / Estimate.haar, not inferrable from the sampler itself).
+
+    `_recommended_batch_size_for_d` (what callers use to pick n_samples) only
+    estimates _estimate_from_batches's own peak memory -- it has no way to
+    know the sampler's peak, which for sample_unitaries includes whatever
+    apply_embedded_gate's reshape/movedim pipeline needs transiently per gate,
+    on top of the (batch, d, d) unitary itself. That gap is what actually
+    OOMs in practice at large d, not the formula being wrong about the part
+    it does model. Rather than pad the formula with a guessed safety factor
+    for a cost it can't see, this backs off and retries on an actual CUDA
+    OOM: halve n_samples, free the cache, try again, down to a floor of 4.
+    The returned Estimate.n_pairs honestly reflects whatever batch size
+    actually succeeded, so callers (including estimate_until_converged_from_sampler,
+    which just sees a smaller-than-requested batch and keeps looping) don't
+    need to know this happened.
+    """
     if device is None:
         device = get_device()
-    n_a = n_samples // 2
-    n_b = n_samples - n_a
-    UA = sampler(n_a, device=device, dtype=dtype, generator=generator)
-    UB = sampler(n_b, device=device, dtype=dtype, generator=generator)
-    return _estimate_from_batches(UA, UB, t, d)
+    n = n_samples
+    while True:
+        n_a = n // 2
+        n_b = n - n_a
+        try:
+            UA = sampler(n_a, device=device, dtype=dtype, generator=generator)
+            UB = sampler(n_b, device=device, dtype=dtype, generator=generator)
+            return _estimate_from_batches(UA, UB, t, d)
+        except RuntimeError as e:
+            if not _is_oom(e) or n <= 4:
+                raise
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            n_next = max(4, n // 2)
+            print(f"  [frame_potential] OOM at n_samples={n} (device={device}) -- "
+                  f"retrying at {n_next}")
+            n = n_next
 
 
 def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
@@ -329,8 +376,24 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
         n_samples = d * t * 10  # heuristic starting point (matches d = 2**n_qubits for circuit ensembles)
 
     max_batch_size = _recommended_batch_size_for_d(d, device, dtype)
+    n_samples = min(n_samples, max_batch_size)  # the heuristic above grows with d; the memory
+                                                 # cap shrinks with d -- clamp before the first
+                                                 # call too, not just the doublings below, or a
+                                                 # large-d first call can ask for far more than
+                                                 # fits (this was the actual OOM cause -- see
+                                                 # _estimate_from_batches's docstring for the rest)
     est = estimate_once_from_sampler(sampler, d, t, n_samples,
                                       device=device, dtype=dtype, generator=generator)
+    # estimate_once_from_sampler backs off silently on OOM, so what it actually
+    # used can be smaller than what was asked for -- n_pairs = n_a*n_b with
+    # n_a ~= n_b ~= n/2 gives n ~= 2*sqrt(n_pairs). If it backed off, treat that
+    # as the new ceiling instead of max_batch_size, or every doubling below
+    # would re-discover the exact same OOM (and pay its own backoff sub-loop)
+    # from scratch every single iteration.
+    achieved = int(round(2 * math.sqrt(est.n_pairs)))
+    if achieved < n_samples:
+        max_batch_size = min(max_batch_size, achieved)
+        n_samples = achieved
 
     for i in range(max_batches):
         target = abs(rel_tol * est.delta)
@@ -340,8 +403,13 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
             print(f"  batch {i}: F={est.frame_potential:.4f} error={est.fidelity_error:.4f} "
                   f"target={target:.4f} n_pairs={est.n_pairs}")
         n_samples = min(n_samples * 2, max_batch_size)
-        est = est + estimate_once_from_sampler(sampler, d, t, n_samples,
-                                                device=device, dtype=dtype, generator=generator)
+        new_est = estimate_once_from_sampler(sampler, d, t, n_samples,
+                                              device=device, dtype=dtype, generator=generator)
+        achieved = int(round(2 * math.sqrt(new_est.n_pairs)))
+        if achieved < n_samples:
+            max_batch_size = min(max_batch_size, achieved)
+            n_samples = achieved
+        est = est + new_est
 
     return est
 
