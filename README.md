@@ -154,13 +154,49 @@ resulting unitary is exactly Haar-distributed on `SU(4)`. Verified via
 `frame_potential`: `F^(t)` matches the exact Haar value `t!` for `t=1,2,3`
 to within Monte Carlo error.
 
-Circuit 34 applies the same 15-parameter Haar-exact block brickwise across
-`n_qubits > 2` (same alternating-offset brick pattern as circuit 32), so
-each local 2-qubit interaction is individually exactly Haar-random; it
-reduces to circuit 33 when `n_qubits == 2`. This does *not* make the whole
-`n`-qubit unitary Haar-random on its own (that needs enough `reps` for the
-brickwork to mix, same as any local random circuit) — `F^(t)` for circuit
-34 decreases towards the Haar value as `reps` grows, as expected.
+Circuit 34 applies the same Haar-exact block brickwise across `n_qubits > 2`
+(same alternating-offset brick pattern as circuit 32), so each local 2-qubit
+interaction is individually exactly Haar-random; it reduces to circuit 33
+when `n_qubits == 2`. This does *not* make the whole `n`-qubit unitary
+Haar-random on its own (that needs enough `reps` for the brickwork to mix,
+same as any local random circuit) — `F^(t)` for circuit 34 decreases towards
+the Haar value as `reps` grows, as expected.
+
+Params aren't the naive `15` per gate either. Both circuits apply ONE
+upfront Haar-random `SU(2)` dressing per wire (`local_su2`, 3 params
+each) before any 2-qubit gate at all, and from then on every gate —
+every layer, every pair — reads only a truncated 9-parameter block
+(`core_kak` + both *trailing* `local_su2` calls, no leading dressing).
+A gate's leading dressing would just be a second,
+independent Haar-random `SU(2)` element stacked on whatever's already on
+that wire — already Haar-random by the upfront layer or an earlier gate's
+trailing dressing — and composing with anything independent leaves it
+Haar-random, so it's redundant, not merely approximable away. This makes
+`weight_tensor_shape` for circuits 33-36 a flat `(6 + reps*9,)` (circuit
+33/35, fixed 2 wires) or `(num_wires*3 + <gate params>,)` (34/36) rather
+than the paper's literal `(reps, num_pairs, 15)` — e.g. at `n_qubits=6,
+reps=4`, total params drop from 150 to 108 (-28%), growing to -34% by
+`n_qubits=10, reps=8`. Verified against an independent from-scratch
+reference circuit (raw `qml` ops, not reusing `circuits.py`'s own
+functions) to machine precision, across even and odd `n_qubits` and
+several `reps`. One narrow, deliberately-accepted side effect: at odd
+`n_qubits` with `reps=1` specifically, the brick pattern's window doesn't
+yet reach one boundary wire, so that wire's upfront dressing has no gate
+to pair with this circuit — a harmless, disconnected extra `SU(2)`
+rotation (+3 params) that the literal paper circuit wouldn't have applied
+at all. It self-resolves from `reps=2` on, once every wire has been
+reached by at least one gate.
+
+Circuits 33-36 share exactly two gate-level primitives in `circuits.py`:
+`core_kak(tz, ty1, ty2, wires)` (the 3-CNOT canonical core) and
+`local_su2(alpha, beta, gamma, wire)` (`RZ(alpha) RY(beta) RZ(gamma)`).
+Neither one decides Haar vs. naive itself — each `circuit_set` branch
+either derives its angles via `haar_reparam.euler_angles`/`sample_canonical`
+(33/34) or passes its raw `Uniform(0, 2*pi)` parameters straight through
+unchanged (35/36) before calling them. `two_designs/range_connectivity.py`'s
+`draw_display_circuit` uses the same two primitives directly, for the same
+reason — every gate there is independent, with no earlier gate's dressing
+to inherit, so it always builds a full, standalone block.
 
 ```bash
 python run.py frame-potential --circuits 33 --n-qubits 2 --reps 1 --t 1 2 3 --device cpu
@@ -177,7 +213,7 @@ run via `python check.py validate --only local-random` (or the short alias
 `--only b`).
 
 **Circuits 35/36** are the ablation: the exact same gate structure as 33/34
-(same `kak1_core`, same 4 local `SU(2)` blocks, same parameter count), but
+(same `core_kak`, same 4 local `SU(2)` blocks, same parameter count), but
 the raw `Uniform(0, 2*pi)` parameters are used directly as gate angles
 instead of being pushed through `haar_reparam` — no Bloch-sphere correction
 on the local angles, no Rosenblatt transform on the 3 non-local ones. They
@@ -414,7 +450,7 @@ builds a PennyLane circuit at all (see "Range-limited connectivity" above
 there's no existing object to draw. `draw_display_circuit` is a second,
 display-only builder — never called from the sampler — that draws one
 concrete wiring plus one concrete set of gate angles (both reproducible via
-`--seed`) and queues real `kak1_haar_block` calls for it. Its output prints
+`--seed`) and queues real `core_kak`/`local_su2` calls for it. Its output prints
 the wiring in plain text first (which pairs connect in which layer, and
 which qubits sit idle that layer), then the matching ASCII diagram, so the
 connectivity pattern doesn't have to be reverse-engineered from the

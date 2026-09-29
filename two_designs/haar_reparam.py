@@ -1,5 +1,6 @@
 """Reparametrization for exact Haar sampling of the KAK1 two-qubit ansatz
-(circuits.py's `kak1_haar_block`, circuit numbers 33/34).
+(circuits.py's circuit_set numbers 33/34, built from circuits.py's
+core_kak/local_su2 primitives).
 
 Background
 ----------
@@ -20,9 +21,9 @@ angles need a fully joint, non-separable reshaping with no simple
 closed-form inverse-CDF.
 
 This module supplies that reshaping ("Phi" in the design discussion) so
-that circuits.py's kak1_haar_block, fed raw Uniform(0, 2*pi) parameters
-(exactly what sample_unitaries already produces for every other circuit),
-produces exactly Haar-distributed two-qubit unitaries.
+that circuits.py's circuit_set(33)/circuit_set(34), fed raw Uniform(0, 2*pi)
+parameters (exactly what sample_unitaries already produces for every other
+circuit), produce exactly Haar-distributed two-qubit unitaries.
 
 Local part (12 of 15 parameters) — closed form
 ------------------------------------------------
@@ -188,21 +189,23 @@ def euler_angles(u_alpha: torch.Tensor, u_beta: torch.Tensor, u_gamma: torch.Ten
 
 # ── direct (PennyLane-free) matrix construction ────────────────────────────
 #
-# circuits.py's kak1_haar_block builds the same block by queuing PennyLane
-# operations, which is the right thing to do when you want ONE trace applied
-# to a big batch (frame_potential.sample_unitaries's whole design). It is
-# the wrong thing when a caller needs MANY small, differently-wired
-# constructions -- e.g. two_designs/range_connectivity.py, which draws a
-# fresh 2-qubit gate embedding per wire pair per layer per wiring instance:
-# retracing circuits.py's PennyLane queue on every one of those calls turned
-# out to dominate runtime completely (a few thousand retraces of a tiny
-# circuit costs far more than the circuit itself). kak1_block_matrix below
-# is the same math -- same gate sequence, same GlobalPhase(-pi/4) det
-# correction -- reimplemented as direct batched torch matrix construction,
-# with no PennyLane tracing at all. Verified to agree with
+# circuits.py's core_kak/local_su2 build the same block by queuing PennyLane
+# operations, which is the right thing to do when you want ONE trace
+# applied to a big batch (frame_potential.sample_unitaries's whole design,
+# behind circuit_set(33)/(34)). It is the wrong thing when a caller needs
+# MANY small, differently-wired constructions -- e.g.
+# two_designs/range_connectivity.py, which draws a fresh 2-qubit gate
+# embedding per wire pair per layer per wiring instance: retracing
+# circuits.py's PennyLane queue on every one of those calls turned out to
+# dominate runtime completely (a few thousand retraces of a tiny circuit
+# costs far more than the circuit itself). kak1_block_matrix below is the
+# same math -- same gate sequence, same GlobalPhase(-pi/4) det correction
+# -- reimplemented as direct batched torch matrix construction, with no
+# PennyLane tracing at all. Verified to agree with
 # frame_potential.sample_unitaries(33, ...) (which goes through circuits.py
-# and PennyLane) to machine precision -- see two_designs/range_connectivity.py's
-# module docstring / the design session's own checks for how.
+# and PennyLane) to machine precision -- see
+# two_designs/range_connectivity.py's module docstring / the design
+# session's own checks for how.
 
 def _rz_matrix(theta: torch.Tensor) -> torch.Tensor:
     """theta: (...,) real -> (..., 2, 2) complex128."""
@@ -246,9 +249,13 @@ _CNOT_Q1Q0 = torch.tensor([[1, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [0, 1, 0, 0
 
 
 def kak1_block_matrix(raw15: torch.Tensor) -> torch.Tensor:
-    """raw15: (15, B) tensor, entries Uniform(0, 2*pi) -- same convention and
-    layout as circuits.py's kak1_haar_block (and what
-    frame_potential.sample_unitaries(33, ...) draws internally). Returns
+    """raw15: (15, B) tensor, entries Uniform(0, 2*pi) -- one full, standalone
+    KAK1 block: [0:3]=A1, [3:6]=A0, [6:9]=canonical, [9:12]=B1, [12:15]=B0,
+    same convention two_designs/range_connectivity.py's draw_display_circuit
+    builds per gate (every gate there is independent, nothing to inherit a
+    dressing from -- unlike circuit_set(33)/(34), which only use this full
+    form for a wire's first touch and a truncated 9-parameter form after).
+    Returns
     the (B, 4, 4) complex128 unitary directly -- see the block comment
     above for why this exists alongside the PennyLane version."""
     device = raw15.device

@@ -63,17 +63,10 @@ def parametrized_CX_chain(params, wires):
         qp.Hadamard(wires=wires[i])
 
 
-def kak1_core(tz, ty1, ty2, wires):
+def core_kak(tz, ty1, ty2, wires):
     """The 3-CNOT canonical (non-local) core of Tucci's KAK1: realizes
     exp(i(k1 XX + k2 YY + k3 ZZ)) for (k1,k2,k3) a fixed linear function of
-    (tz,ty1,ty2). wires: [w0, w1]. See haar_reparam.py for how (tz,ty1,ty2)
-    must be distributed for the *dressed* (locals-on-both-sides) gate to be
-    Haar-random on SU(4).
-
-    Each CNOT has determinant -1, so 3 of them make the raw circuit land in
-    the det=-1 sheet of U(4), not SU(4) -- a fixed GlobalPhase(-pi/4) cancels
-    that (det scales by exp(-i*4*phi) for a 2-qubit global phase), landing
-    exactly on SU(4) as KAK1 requires.
+    (tz,ty1,ty2). wires: [w0, w1].
     """
     w0, w1 = wires
     qp.CNOT(wires=[w0, w1])
@@ -82,72 +75,20 @@ def kak1_core(tz, ty1, ty2, wires):
     qp.CNOT(wires=[w1, w0])
     qp.RY(ty2, wires=w0)
     qp.CNOT(wires=[w0, w1])
-    qp.GlobalPhase(-torch.pi / 4, wires=wires)
 
 
-def kak1_local_su2(u, wire):
-    """u : tensor of shape (3, ...), entries Uniform[0,1) -> Haar-random SU(2)
-    on `wire` (RZ(gamma) RY(beta) RZ(alpha), see haar_reparam.euler_angles)."""
-    alpha, beta, gamma = haar_reparam.euler_angles(u[0], u[1], u[2])
+def local_su2(alpha, beta, gamma, wire):
     qp.RZ(alpha, wires=wire)
     qp.RY(beta, wires=wire)
     qp.RZ(gamma, wires=wire)
 
 
-def kak1_local_su2_naive(raw3, wire):
-    """raw3 : tensor of shape (3, ...), entries Uniform(0, 2*pi) used
-    directly as RZ-RY-RZ Euler angles -- NOT Haar-random on SU(2) (the
-    middle angle needs haar_reparam.euler_angles' arccos correction for
-    that; used bare here it over-samples the poles of the Bloch sphere
-    relative to the equator). Exists as the "no reparametrization" half of
-    the kak1_block_naive / kak1_haar_block ablation pair, circuits 33-36."""
-    qp.RZ(raw3[0], wires=wire)
-    qp.RY(raw3[1], wires=wire)
-    qp.RZ(raw3[2], wires=wire)
-
-
-def kak1_block_naive(raw15, wires):
-    """Same gate structure as kak1_haar_block (4 local SU(2) blocks around
-    the 3-CNOT canonical core, circuits 33/34) but with the raw
-    Uniform(0, 2*pi) parameters used directly as gate angles everywhere --
-    i.e. no reparametrization at all, neither the closed-form local
-    (Bloch-sphere) correction nor haar_reparam.sample_canonical's
-    Rosenblatt transform for the 3 non-local angles. Backs circuits 35/36,
-    which exist purely so frame_potential can quantify what the
-    reparametrization in 33/34 buys you -- same circuit, same parameter
-    count, only the sampling distribution differs.
-
-    raw15 layout: same as kak1_haar_block: [0:3]=A1, [3:6]=A0,
-    [6:9]=canonical (tz,ty1,ty2 used directly, unlike kak1_haar_block),
-    [9:12]=B1, [12:15]=B0.
-    """
-    w0, w1 = wires
-    kak1_local_su2_naive(raw15[0:3], w0)
-    kak1_local_su2_naive(raw15[3:6], w1)
-    kak1_core(raw15[6], raw15[7], raw15[8], [w0, w1])
-    kak1_local_su2_naive(raw15[9:12], w0)
-    kak1_local_su2_naive(raw15[12:15], w1)
-
-
-def kak1_haar_block(raw15, wires):
-    """raw15 : tensor of shape (15, ...), entries Uniform(0, 2*pi) -- exactly
-    what sample_unitaries/circuit_set already generate for every circuit in
-    this file. wires: [w0, w1].
-
-    Realizes U = (A1 (x) A0) exp(i(k1 XX + k2 YY + k3 ZZ)) (B1 (x) B0)
-    (Tucci's KAK1, arXiv:quant-ph/0507171 Eq. 1) with U exactly
-    Haar-distributed on SU(4) -- see haar_reparam.py.
-
-    raw15 layout: [0:3]=A1, [3:6]=A0, [6:9]=canonical (u1,u2,u3), [9:12]=B1, [12:15]=B0.
-    """
-    w0, w1 = wires
-    u = raw15 / (2 * torch.pi)
-    kak1_local_su2(u[0:3], w0)   # A1
-    kak1_local_su2(u[3:6], w1)   # A0
-    tz, ty1, ty2 = haar_reparam.sample_canonical(u[6], u[7], u[8])
-    kak1_core(tz, ty1, ty2, [w0, w1])
-    kak1_local_su2(u[9:12], w0)  # B1
-    kak1_local_su2(u[12:15], w1)  # B0
+def _brickwork_layer_pairs(num_wires: int, layer: int) -> int:
+    """How many 2-qubit gates layer `layer` applies in the alternating-offset
+    brickwork (circuits 32/34/36)"""
+    num_pairs = num_wires // 2
+    wires_parity = 1 - (num_wires % 2)
+    return num_pairs - layer % 2 * wires_parity
 
 
 def circuit_set(name: str = None, num: int = None):
@@ -656,88 +597,138 @@ def circuit_set(name: str = None, num: int = None):
 
     # ------------------------------------------------------------------
     # Circuit 33: KAK1 exact-Haar block (2 qubits only)
-    # params shape: (reps, 1, 15)
+    # params shape: (6 + reps*9,)
     # Tucci's KAK1: U = (A1 x A0) exp(i(k1 XX + k2 YY + k3 ZZ)) (B1 x B0),
     # fed raw Uniform(0, 2*pi) parameters (as sample_unitaries already
-    # generates for every circuit here) and reparametrized via
-    # haar_reparam so the resulting 2-qubit unitary is exactly
-    # Haar-distributed on SU(4). See haar_reparam.py for the derivation
-    # and validation.
+    # generates for every circuit here) and reparametrized 
     # ------------------------------------------------------------------
     elif num == 33:
         def kak1_haar(params, wires=None):
-            """params : tensor of shape (reps, 1, 15) [+ optional trailing batch dim]"""
-            reps = params.shape[0]
+            """params : 1-D tensor of length 6 + reps*9 [+ optional trailing
+            batch dim]. reps is recovered from params' own length rather
+            than taken as an argument, to keep circuit_set(num)(params,
+            wires=...)'s two-argument calling convention unchanged."""
             if wires is None:
                 wires = [0, 1]
+            w0, w1 = wires[0], wires[1]
+            reps = (params.shape[0] - 6) // 9
+
+            u = params[0:6] / (2 * torch.pi)
+            local_su2(*haar_reparam.euler_angles(u[0], u[1], u[2]), w0)
+            local_su2(*haar_reparam.euler_angles(u[3], u[4], u[5]), w1)
             for layer in range(reps):
-                kak1_haar_block(params[layer, 0], wires=[wires[0], wires[1]])
+                start = 6 + layer * 9
+                u = params[start:start + 9] / (2 * torch.pi)
+                core_kak(*haar_reparam.sample_canonical(u[0], u[1], u[2]), [w0, w1])
+                local_su2(*haar_reparam.euler_angles(u[3], u[4], u[5]), w0)
+                local_su2(*haar_reparam.euler_angles(u[6], u[7], u[8]), w1)
 
         return kak1_haar
 
     # ------------------------------------------------------------------
     # Circuit 34: KAK1 exact-Haar block, brickwork (N qubits)
-    # params shape: (reps, num_wires // 2, 15)
-    # Same 15-parameter Haar-exact 2-qubit block as circuit 33, applied to
-    # adjacent-pair "bricks" that alternate offset by one wire each layer
-    # (same brick pattern as circuit 32). Reduces to circuit 33 exactly
-    # when num_wires == 2.
+    # params shape: (num_wires*3 + sum_of__brickwork_layer_pairs*9,) 
     # ------------------------------------------------------------------
     elif num == 34:
         def kak1_haar_brickwall(params, wires=None):
-            """params : tensor of shape (reps, num_wires // 2, 15) [+ optional trailing batch dim]"""
-            num_layers, num_pairs = params.shape[0], params.shape[1]
+            """params : 1-D tensor [+ optional trailing batch dim]. Unlike
+            the old (reps, num_pairs, 15) shape, a flat tensor's own length
+            no longer carries num_pairs/reps separately, so `wires` must be
+            given explicitly here (every real caller already does)."""
             if wires is None:
-                wires = list(range(num_pairs * 2))
+                raise ValueError("circuit 34 needs `wires` given explicitly -- "
+                                  "num_wires can't be recovered from a flat params "
+                                  "tensor's length alone")
             num_wires = len(wires)
-            wires_parity = 1 - (num_wires % 2)
 
-            for layer in range(num_layers):
-                layer_pairs = num_pairs - layer % 2 * wires_parity
+            u_init = params[:num_wires * 3] / (2 * torch.pi)
+            for idx, w in enumerate(wires):
+                ui = u_init[3 * idx: 3 * idx + 3]
+                local_su2(*haar_reparam.euler_angles(ui[0], ui[1], ui[2]), w)
+
+            offset = num_wires * 3
+            remaining = params.shape[0] - offset
+            layer = 0
+            while remaining > 0:
+                layer_pairs = _brickwork_layer_pairs(num_wires, layer)
                 layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
                 for i in range(layer_pairs):
-                    kak1_haar_block(params[layer, i], wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
+                    start = offset + i * 9
+                    u = params[start:start + 9] / (2 * torch.pi)
+                    w0, w1 = layer_wires[2 * i], layer_wires[2 * i + 1]
+                    core_kak(*haar_reparam.sample_canonical(u[0], u[1], u[2]), [w0, w1])
+                    local_su2(*haar_reparam.euler_angles(u[3], u[4], u[5]), w0)
+                    local_su2(*haar_reparam.euler_angles(u[6], u[7], u[8]), w1)
+                consumed = layer_pairs * 9
+                offset += consumed
+                remaining -= consumed
+                layer += 1
 
         return kak1_haar_brickwall
 
     # ------------------------------------------------------------------
     # Circuit 35: KAK1 ablation -- same block as 33, no reparametrization
-    # params shape: (reps, 1, 15)
+    # params shape: (6 + reps*9,)
     # Identical gate structure to circuit 33 (4 local SU(2) + 3-CNOT core),
     # but the raw Uniform(0, 2*pi) parameters are used directly as gate
-    # angles instead of being pushed through haar_reparam. Compare F^(t)
-    # against circuit 33 to quantify what the reparametrization buys you.
+    # angles instead of being pushed through haar_reparam. 
     # ------------------------------------------------------------------
     elif num == 35:
         def kak1_uniform(params, wires=None):
-            """params : tensor of shape (reps, 1, 15) [+ optional trailing batch dim]"""
-            reps = params.shape[0]
+            """params : 1-D tensor of length 6 + reps*9 [+ optional trailing
+            batch dim]."""
             if wires is None:
                 wires = [0, 1]
+            w0, w1 = wires[0], wires[1]
+            reps = (params.shape[0] - 6) // 9
+
+            local_su2(params[0], params[1], params[2], w0)
+            local_su2(params[3], params[4], params[5], w1)
             for layer in range(reps):
-                kak1_block_naive(params[layer, 0], wires=[wires[0], wires[1]])
+                start = 6 + layer * 9
+                p = params[start:start + 9]
+                core_kak(p[0], p[1], p[2], [w0, w1])
+                local_su2(p[3], p[4], p[5], w0)
+                local_su2(p[6], p[7], p[8], w1)
 
         return kak1_uniform
 
     # ------------------------------------------------------------------
     # Circuit 36: KAK1 ablation, brickwork -- same as 34, no reparametrization
-    # params shape: (reps, num_wires // 2, 15)
-    # Brickwork counterpart of circuit 35, exactly as 34 is to 33.
+    # params shape: (num_wires*3 + sum_of__brickwork_layer_pairs*9,) 
     # ------------------------------------------------------------------
     elif num == 36:
         def kak1_uniform_brickwall(params, wires=None):
-            """params : tensor of shape (reps, num_wires // 2, 15) [+ optional trailing batch dim]"""
-            num_layers, num_pairs = params.shape[0], params.shape[1]
+            """params : 1-D tensor [+ optional trailing batch dim]; `wires`
+            must be given explicitly, same reason as circuit 34."""
             if wires is None:
-                wires = list(range(num_pairs * 2))
+                raise ValueError("circuit 36 needs `wires` given explicitly -- "
+                                  "num_wires can't be recovered from a flat params "
+                                  "tensor's length alone")
             num_wires = len(wires)
-            wires_parity = 1 - (num_wires % 2)
 
-            for layer in range(num_layers):
-                layer_pairs = num_pairs - layer % 2 * wires_parity
+            init = params[:num_wires * 3]
+            for idx, w in enumerate(wires):
+                ui = init[3 * idx: 3 * idx + 3]
+                local_su2(ui[0], ui[1], ui[2], w)
+
+            offset = num_wires * 3
+            remaining = params.shape[0] - offset
+            layer = 0
+            while remaining > 0:
+                layer_pairs = _brickwork_layer_pairs(num_wires, layer)
                 layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
                 for i in range(layer_pairs):
-                    kak1_block_naive(params[layer, i], wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
+                    start = offset + i * 9
+                    p = params[start:start + 9]
+                    w0, w1 = layer_wires[2 * i], layer_wires[2 * i + 1]
+                    core_kak(p[0], p[1], p[2], [w0, w1])
+                    local_su2(p[3], p[4], p[5], w0)
+                    local_su2(p[6], p[7], p[8], w1)
+                consumed = layer_pairs * 9
+                offset += consumed
+                remaining -= consumed
+                layer += 1
 
         return kak1_uniform_brickwall
 
@@ -792,13 +783,13 @@ def weight_tensor_shape(num, num_wires, reps = 1):
     elif num == 32:
         return (reps, num_wires, 2)
     elif num == 33:
-        return (reps, 1, 15)
+        return (6 + reps * 9,)
     elif num == 34:
-        return (reps, num_wires // 2, 15)
+        return (num_wires * 3 + sum(_brickwork_layer_pairs(num_wires, layer) for layer in range(reps)) * 9,)
     elif num == 35:
-        return (reps, 1, 15)
+        return (6 + reps * 9,)
     elif num == 36:
-        return (reps, num_wires // 2, 15)
+        return (num_wires * 3 + sum(_brickwork_layer_pairs(num_wires, layer) for layer in range(reps)) * 9,)
     else:
         raise ValueError(f"Circuit number {num} is not defined.")
 

@@ -58,9 +58,9 @@ from typing import Optional
 import numpy as np
 import torch
 
-from circuits import kak1_haar_block
+from circuits import core_kak, local_su2
 from frame_potential import apply_embedded_gate, get_device
-from two_designs.haar_reparam import kak1_block_matrix
+from two_designs.haar_reparam import euler_angles, kak1_block_matrix, sample_canonical
 
 
 def random_matching(n_qubits: int, max_range: int, rng: np.random.Generator) -> list[tuple[int, int]]:
@@ -163,6 +163,15 @@ def draw_display_circuit(n_qubits: int, reps: int, max_range: int, *, seed: Opti
         for layer_pairs in wiring:
             for (w0, w1) in layer_pairs:
                 raw15 = 2 * torch.pi * torch.rand(15, generator=gen, dtype=torch.float64)
-                kak1_haar_block(raw15, wires=[w0, w1])
+                u = raw15 / (2 * torch.pi)
+                # a full, standalone Haar-exact block -- every pair here is
+                # independent by design (see module docstring), so unlike
+                # circuits.py's circuits 33/34 there's no earlier gate on
+                # either wire to inherit a dressing from.
+                local_su2(*euler_angles(u[0], u[1], u[2]), w0)
+                local_su2(*euler_angles(u[3], u[4], u[5]), w1)
+                core_kak(*sample_canonical(u[6], u[7], u[8]), [w0, w1])
+                local_su2(*euler_angles(u[9], u[10], u[11]), w0)
+                local_su2(*euler_angles(u[12], u[13], u[14]), w1)
 
     return circuit_fn, wiring
