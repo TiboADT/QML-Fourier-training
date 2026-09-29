@@ -30,8 +30,9 @@ architecture is one fixed gate sequence traced once and then batch-applied
 with random angles (see frame_potential.sample_unitaries), which has no
 room for "which wires" to vary within a batch. So this plugs into
 frame_potential's generic sampler interface instead (same reason
-two_designs/clifford_group.py does) -- but it still reuses circuit 33's
-math for the actual 2-qubit gate (via haar_reparam.kak1_block_matrix, a
+two_designs/clifford_group.py does) -- but it still reuses circuit 34's
+Haar-reparametrized math for the actual 2-qubit gate (via
+haar_reparam.kak1_block_matrix, a
 direct/PennyLane-free reimplementation used here specifically because this
 module needs MANY small, differently-wired constructions -- retracing
 circuits.py's PennyLane queue that many times turned out to dominate
@@ -58,9 +59,9 @@ from typing import Optional
 import numpy as np
 import torch
 
-from circuits import core_kak, local_su2
+from circuits import core_kak, haar_su2_params, local_su2
 from frame_potential import apply_embedded_gate, get_device
-from two_designs.haar_reparam import euler_angles, kak1_block_matrix, sample_canonical
+from two_designs.haar_reparam import kak1_block_matrix, sample_canonical
 
 
 def random_matching(n_qubits: int, max_range: int, rng: np.random.Generator) -> list[tuple[int, int]]:
@@ -99,7 +100,7 @@ def sample_range_connected_unitaries(n_qubits: int, reps: int, max_range: int, b
                                       generator: Optional[torch.Generator] = None,
                                       samples_per_wiring: int = 50) -> torch.Tensor:
     """batch_size independent samples of a `reps`-layer circuit where every
-    layer applies circuit 33 (the exact-Haar KAK1 block) to a fresh
+    layer applies circuit 34's exact-Haar KAK1 block to a fresh
     random_matching restricted to `max_range`. Matches the generic
     frame_potential sampler interface (batch_size, *, device, dtype,
     generator) -> Tensor[batch_size, d, d].
@@ -163,15 +164,13 @@ def draw_display_circuit(n_qubits: int, reps: int, max_range: int, *, seed: Opti
         for layer_pairs in wiring:
             for (w0, w1) in layer_pairs:
                 raw15 = 2 * torch.pi * torch.rand(15, generator=gen, dtype=torch.float64)
-                u = raw15 / (2 * torch.pi)
                 # a full, standalone Haar-exact block -- every pair here is
                 # independent by design (see module docstring), so unlike
-                # circuits.py's circuits 33/34 there's no earlier gate on
+                # circuit_set(34)'s brickwork there's no earlier gate on
                 # either wire to inherit a dressing from.
-                local_su2(*euler_angles(u[0], u[1], u[2]), w0)
-                local_su2(*euler_angles(u[3], u[4], u[5]), w1)
-                core_kak(*sample_canonical(u[6], u[7], u[8]), [w0, w1])
-                local_su2(*euler_angles(u[9], u[10], u[11]), w0)
-                local_su2(*euler_angles(u[12], u[13], u[14]), w1)
+                local_su2(haar_su2_params(raw15[0:6].reshape(2, 3)), wires=[w0, w1])
+                u = raw15[6:9] / (2 * torch.pi)
+                core_kak(*sample_canonical(u[0], u[1], u[2]), [w0, w1])
+                local_su2(haar_su2_params(raw15[9:15].reshape(2, 3)), wires=[w0, w1])
 
     return circuit_fn, wiring

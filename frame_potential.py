@@ -63,13 +63,8 @@ def _recommended_batch_size_for_d(d: int, device: torch.device,
                                    dtype: torch.dtype = torch.complex64) -> int:
     """Largest N such that _estimate_from_batches's peak memory -- two
     (N, d^2) reshaped batches plus the (N, N) GEMM output, peak = 2*N*d^2*bpe
-    + N^2*bpe -- fits comfortably in available memory. Solved as a quadratic
-    in N (same formula checks/benchmark.py's bench_frame_potential prints as
-    "GEMM N"), not the sqrt(usable / d^2) estimate this used before
-    _estimate_from_batches was switched from an einsum broadcast (which
-    actually materialized an (N, N, d, d) intermediate, O(N^2*d^2) memory)
-    to that GEMM -- the old formula is still a valid cap for that older,
-    much more memory-hungry path, just needlessly conservative for this one."""
+    + N^2*bpe -- fits comfortably in available memory."""
+
     bytes_per_element = 8 if dtype == torch.complex64 else 16
     if device.type == "cuda":
         free_bytes, _ = torch.cuda.mem_get_info(device)
@@ -102,8 +97,7 @@ def _trace_operations(num, n_qubits, weights):
 
 def _fused_gate_list(operations, dtype, device):
     """Merge consecutive single-qubit gates on the same wire into one
-    matrix (cheap, O(batch) per merge) so the full-tensor contraction in
-    apply_embedded_gate runs once per fused block instead of once per raw gate."""
+    matrix (cheap, O(batch) per merge) """
     pending = {}
     fused = []
 
@@ -138,17 +132,10 @@ def _fused_gate_list(operations, dtype, device):
 
 def apply_embedded_gate(U: torch.Tensor, G: torch.Tensor, wires: tuple, n_qubits: int) -> torch.Tensor:
     """Apply gate matrix G (2^k, 2^k) or (batch, 2^k, 2^k) to `wires` of the
-    batched unitary U (batch, d, d), in place of a full kron(I, G, I) + matmul.
+    batched unitary U (batch, d, d).
     Reshapes U's row-index into one axis per qubit, moves the target axes to
     the front, contracts, and moves them back — O(batch * d^2) instead of
     O(batch * d^3) per gate, since only the touched axes are ever expanded.
-
-    Public (not circuit_set-specific) because it's exactly what's needed to
-    embed a gate at an arbitrary, per-call-chosen pair of wires -- e.g.
-    two_designs/range_connectivity.py builds each layer's unitary by
-    embedding fresh circuit-33 (KAK1 Haar block) samples at a randomly drawn
-    wire pair, one call per pair, rather than a fixed circuit_set gate
-    sequence.
     """
     B, d, _ = U.shape
     k = len(wires)
@@ -171,14 +158,6 @@ def sample_unitaries(num: int, n_qubits: int, reps: int, batch_size: int, *,
     """batch_size independent samples of circuit_set(num)'s unitary at
     (n_qubits, reps), each with parameters drawn uniformly on [0, 2*pi).
     Returns a (batch_size, d, d) tensor on `device`.
-
-    Verified exact (vs qml.matrix()) for circuits 1-19 and 31-32. Circuit 30
-    (qp.StronglyEntanglingLayers, a PennyLane built-in template rather than
-    circuits.py's own code) is NOT supported: it validates its weights
-    tensor's shape assuming the batch dimension would be leading, not the
-    trailing one circuits.py's own circuits are indifferent to, and raises
-    a ValueError. Not one of the 19 paper architectures, so left as a
-    documented gap rather than special-cased.
     """
     if device is None:
         device = get_device()
@@ -202,12 +181,12 @@ def sample_unitaries(num: int, n_qubits: int, reps: int, batch_size: int, *,
 class Estimate:
     """One (possibly pooled) Monte Carlo estimate of F^(t).
 
-    `total`/`sum_sq` are the raw Σ|Tr(Ui†Uj)|^(2t) / Σ|Tr(Ui†Uj)|^(4t) sums
-    over n_pairs pairs — additive across independent batches. `variance` is
-    the *unbiased* variance of `frame_potential` for this batch: treating
-    the n_pairs pairs as independent (naive Var = sum_sq/n_pairs - F^2)
-    ignores the row/column correlations from reusing each Ui against every
-    Vj, which is negligible at small N but not always (code review §1.4) —
+        'total'/'sum_sq' are the raw Σ|Tr(Ui†Uj)|^(2t) / Σ|Tr(Ui†Uj)|^(4t) sums
+        over n_pairs pairs — additive across independent batches. 
+        'variance' is the *unbiased* variance of `frame_potential`
+        'n_pairs' is the number of independent pairs contributing to this estimate.
+        't'/'d' are the frame potential order and Hilbert space dimension.
+
     __add__ pools it correctly across batches (as an n_k-weighted average of
     independent-batch variances) rather than re-deriving a fresh naive one
     from the pooled sums.
@@ -266,18 +245,9 @@ class Estimate:
 
 
 def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -> Estimate:
-    """Shared math for both estimate_once_from_sampler and the exact
-    (whole-group) path: given two independent batches of unitaries, build the
-    Estimate from all n_a * n_b cross pairs. UA, UB: (n_a, d, d) / (n_b, d, d).
-
-    traces[i, j] = Tr(UA_i^dagger UB_j), via a GEMM on the flattened (d^2,)
-    unitaries rather than broadcasting both batch dims against each other
-    before contracting: that broadcast form (an einsum this used previously)
-    materializes an (n_a, n_b, d, d) intermediate -- O(n_a*n_b*d^2) memory --
-    where this is the identical contraction reshaped into one matmul,
-    O(n_a*d^2 + n_b*d^2 + n_a*n_b) memory. See checks/benchmark.py's
-    bench_frame_potential, which times and numerically verifies the two
-    against each other."""
+    """given two independent batches of unitaries, 
+    build the Estimate from all n_a * n_b cross pairs. UA, UB: (n_a, d, d) / (n_b, d, d).
+    """
     accum_dtype = torch.float64
     n_a, n_b = UA.shape[0], UB.shape[0]
     traces = UA.reshape(n_a, -1).conj() @ UB.reshape(n_b, -1).T  # (n_a, n_b)
@@ -287,7 +257,6 @@ def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -
     sum_sq = (torch.abs(traces) ** (4 * t)).to(accum_dtype).sum().item()
 
     # Unbiased variance for this balanced two-way random-effects layout
-    # see Estimate's docstring.
     gm = P.mean()
     r = P.mean(dim=1)
     c = P.mean(dim=0)
@@ -300,15 +269,13 @@ def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -
                      n_pairs=n_a * n_b, t=t, d=d)
 
 
-# A `sampler` is any callable (batch_size, *, device, dtype, generator) ->
-# Tensor[batch_size, d, d] of unitaries — sample_unitaries(num, n_qubits, reps,
-# ...) partially applied is one, but so is e.g.
-# two_designs.family_a_clifford.sample_clifford_unitaries, or any other
-# ensemble that isn't a circuit_set architecture at all. Everything below
-# this line only depends on the sampler through that interface.
 
 Sampler = Callable[..., torch.Tensor]
-
+"""
+A `Sampler` is any callable (batch_size, *, device, dtype, generator) ->
+Tensor[batch_size, d, d] of unitaries — sample_unitaries(num, n_qubits, reps,
+...) partially applied is one, but so is a function that generates random unitaries.
+"""
 
 def _is_oom(exc: RuntimeError) -> bool:
     return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
@@ -319,8 +286,8 @@ def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int,
                                 dtype: torch.dtype = torch.complex64,
                                 generator: Optional[torch.Generator] = None) -> Estimate:
     """Draw n_samples unitaries from `sampler` (split into two independent
-    halves A, B) and estimate F^(t) from all n_a * n_b cross pairs. `d` is
-    the Hilbert space dimension the sampler produces (needed for
+    halves A, B) and estimate F^(t) from all n_a * n_b cross pairs. 
+    `d` is the Hilbert space dimension the sampler produces (needed for
     Estimate.d / Estimate.haar, not inferrable from the sampler itself).
 
     `_recommended_batch_size_for_d` (what callers use to pick n_samples) only
@@ -373,7 +340,7 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
     if device is None:
         device = get_device()
     if n_samples is None:
-        n_samples = d * t * 10  # heuristic starting point (matches d = 2**n_qubits for circuit ensembles)
+        n_samples = d * t * 10  # heuristic starting point
 
     max_batch_size = _recommended_batch_size_for_d(d, device, dtype)
     n_samples = min(n_samples, max_batch_size)  # the heuristic above grows with d; the memory
@@ -428,10 +395,9 @@ def estimate_once(num: int, n_qubits: int, reps: int, t: int, n_samples: int, *,
                    device: Optional[torch.device] = None,
                    dtype: torch.dtype = torch.complex64,
                    generator: Optional[torch.Generator] = None) -> Estimate:
-    """Draw n_samples unitaries (split into two independent halves A, B) and
-    estimate F^(t) from all n_a * n_b cross pairs. Thin circuit_set-specific
-    wrapper around estimate_once_from_sampler — use that directly for
-    ensembles that aren't a circuit_set architecture (see two_designs/)."""
+    """
+    estimate_once_from_sampler Wrapper for circuit_set(num) architectures.
+    """
     return estimate_once_from_sampler(
         _circuit_sampler(num, n_qubits, reps), 2 ** n_qubits, t, n_samples,
         device=device, dtype=dtype, generator=generator,
@@ -447,10 +413,9 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
                               dtype: torch.dtype = torch.complex64,
                               generator: Optional[torch.Generator] = None,
                               verbose: bool = False) -> Estimate:
-    """Keep pooling fresh batches (doubling n_samples each time, capped by
-    available memory) until the 95% CI is within rel_tol of |delta|, or
-    max_batches is reached. Thin circuit_set-specific wrapper around
-    estimate_until_converged_from_sampler."""
+    """
+        estimate_until_converged Wrapper for circuit_set(num) architectures.
+        """
     return estimate_until_converged_from_sampler(
         _circuit_sampler(num, n_qubits, reps), 2 ** n_qubits, t,
         n_samples=n_samples, rel_tol=rel_tol, max_batches=max_batches,

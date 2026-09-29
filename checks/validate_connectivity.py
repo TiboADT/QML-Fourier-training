@@ -1,7 +1,7 @@
 """Calibration + comparison check for range-limited connectivity
 (two_designs/range_connectivity.py) -- "Family C" in the "Building
-2-Designs" design notes: same exact-Haar KAK1 block as the local-random
-check (circuit 33/34), same gate count, but each layer wires up a fresh
+2-Designs" design notes: same exact-Haar KAK1 block as circuit 34 in the
+local-random check, same gate count, but each layer wires up a fresh
 random matching restricted to pairs at most `max_range` apart, instead of
 a fixed nearest-neighbour brickwork. max_range=1 is "local" in the same
 style as circuit 34; max_range >= n_qubits-1 is "fully connected" /

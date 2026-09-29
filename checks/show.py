@@ -17,10 +17,8 @@ line-wrapping *that* caused, mid-diagram and independent of PennyLane's own
 pagination, was most of why this used to be unreadable), with GlobalPhase
 gates dropped: a global scalar phase is invisible to every physical
 measurement and to frame_potential itself, so it carries no information a
-circuit diagram needs -- and for the KAK1-based circuits (33-36) there's
-one per block, which was the other major source of clutter (see
-circuits.py's core_kak for why it's there at all: fixing up a 3-CNOT
-core's determinant).
+circuit diagram needs. No circuit currently in circuits.py actually emits
+one -- but this stays as a no-cost safety net for anything that adds one back.
 
 Pass --mpl to additionally save a Qiskit-style boxed diagram (matplotlib,
 one gate per box, no line-wrapping) to a PNG -- better than ASCII can ever

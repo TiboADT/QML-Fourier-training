@@ -21,9 +21,12 @@ angles need a fully joint, non-separable reshaping with no simple
 closed-form inverse-CDF.
 
 This module supplies that reshaping ("Phi" in the design discussion) so
-that circuits.py's circuit_set(33)/circuit_set(34), fed raw Uniform(0, 2*pi)
-parameters (exactly what sample_unitaries already produces for every other
-circuit), produce exactly Haar-distributed two-qubit unitaries.
+that circuits.py's circuit_set(34), fed raw Uniform(0, 2*pi) parameters
+(exactly what sample_unitaries already produces for every other circuit),
+produces exactly Haar-distributed two-qubit unitaries. circuit_set(33) is
+the same gate structure with the raw angles used directly instead (no
+reparametrization at all) -- an ablation to quantify what this module
+buys you, not a second consumer of it.
 
 Local part (12 of 15 parameters) — closed form
 ------------------------------------------------

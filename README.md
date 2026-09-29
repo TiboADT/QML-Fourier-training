@@ -138,96 +138,86 @@ point, each with their own flags — `python run.py --help` lists both.)
 
 ### Circuits 33/34: exact-Haar KAK1 ansatz
 
-Circuit 33 is Tucci's KAK1 decomposition (`quant-ph/0507171`) as a literal
-2-qubit circuit: `U = (A1 ⊗ A0) exp(i(k1 XX + k2 YY + k3 ZZ)) (B1 ⊗ B0)`,
-i.e. 4 local `SU(2)` blocks (3 Euler-angle rotations each) around a 3-CNOT
-canonical core — 15 single-qubit rotations + 3 CNOTs total, matching the
-paper's construction exactly.
+Both circuits implement Tucci's KAK1 decomposition (`quant-ph/0507171`),
+`U = (A1 ⊗ A0) exp(i(k1 XX + k2 YY + k3 ZZ)) (B1 ⊗ B0)`, brickwork-tiled
+across any `n_qubits` (same alternating-offset brick pattern as circuit
+32) — two local `SU(2)` dressings around a 3-CNOT canonical core, sharing
+exactly two gate-level primitives in `circuits.py`: `core_kak(tz, ty1, ty2,
+wires)` (the canonical core) and `local_su2(params, wires=None)` (`qp.Rot`
+per wire; `params` shaped `(num_wires, 3)`, applied to `wires[i]` for each
+row `i`). Neither primitive decides Haar vs. naive itself — that choice is
+made by whichever `circuit_set` branch calls them.
 
-Unlike every other circuit here, sampling its 15 raw parameters uniformly
-does **not** give a Haar-random unitary — `two_designs/haar_reparam.py`
-reshapes those raw `Uniform(0, 2*pi)` draws (closed-form for the 12 local angles, an
-empirically-built Rosenblatt/quantile transform for the 3 non-local ones —
-see that module's docstring for the derivation and why it's built
-empirically rather than from a hand-derived closed form) so that the
-resulting unitary is exactly Haar-distributed on `SU(4)`. Verified via
-`frame_potential`: `F^(t)` matches the exact Haar value `t!` for `t=1,2,3`
-to within Monte Carlo error.
+**Circuit 34** is the exact-Haar version: every local dressing's raw
+`Uniform(0, 2*pi)` parameters go through `haar_reparam.euler_angles`
+(closed-form) before `local_su2`, and the canonical core's raw parameters
+go through `haar_reparam.sample_canonical` (an empirically-built
+Rosenblatt/quantile transform — see that module's docstring for the
+derivation and why it's built empirically rather than from a hand-derived
+closed form) before `core_kak`. Each dressed 2-qubit gate is exactly
+Haar-distributed on `SU(4)`; verified via `frame_potential`: `F^(t)`
+matches the exact Haar value `t!` for `t=1,2,3` to within Monte Carlo
+error. This does *not* make the whole `n`-qubit unitary Haar-random on its
+own (that needs enough `reps` for the brickwork to mix, same as any local
+random circuit) — `F^(t)` decreases towards the Haar value as `reps`
+grows, as expected.
 
-Circuit 34 applies the same Haar-exact block brickwise across `n_qubits > 2`
-(same alternating-offset brick pattern as circuit 32), so each local 2-qubit
-interaction is individually exactly Haar-random; it reduces to circuit 33
-when `n_qubits == 2`. This does *not* make the whole `n`-qubit unitary
-Haar-random on its own (that needs enough `reps` for the brickwork to mix,
-same as any local random circuit) — `F^(t)` for circuit 34 decreases towards
-the Haar value as `reps` grows, as expected.
-
-Params aren't the naive `15` per gate either. Both circuits apply ONE
-upfront Haar-random `SU(2)` dressing per wire (`local_su2`, 3 params
-each) before any 2-qubit gate at all, and from then on every gate —
-every layer, every pair — reads only a truncated 9-parameter block
-(`core_kak` + both *trailing* `local_su2` calls, no leading dressing).
-A gate's leading dressing would just be a second,
-independent Haar-random `SU(2)` element stacked on whatever's already on
-that wire — already Haar-random by the upfront layer or an earlier gate's
-trailing dressing — and composing with anything independent leaves it
-Haar-random, so it's redundant, not merely approximable away. This makes
-`weight_tensor_shape` for circuits 33-36 a flat `(6 + reps*9,)` (circuit
-33/35, fixed 2 wires) or `(num_wires*3 + <gate params>,)` (34/36) rather
-than the paper's literal `(reps, num_pairs, 15)` — e.g. at `n_qubits=6,
-reps=4`, total params drop from 150 to 108 (-28%), growing to -34% by
-`n_qubits=10, reps=8`. Verified against an independent from-scratch
-reference circuit (raw `qml` ops, not reusing `circuits.py`'s own
-functions) to machine precision, across even and odd `n_qubits` and
-several `reps`. One narrow, deliberately-accepted side effect: at odd
-`n_qubits` with `reps=1` specifically, the brick pattern's window doesn't
-yet reach one boundary wire, so that wire's upfront dressing has no gate
-to pair with this circuit — a harmless, disconnected extra `SU(2)`
-rotation (+3 params) that the literal paper circuit wouldn't have applied
-at all. It self-resolves from `reps=2` on, once every wire has been
-reached by at least one gate.
-
-Circuits 33-36 share exactly two gate-level primitives in `circuits.py`:
-`core_kak(tz, ty1, ty2, wires)` (the 3-CNOT canonical core) and
-`local_su2(alpha, beta, gamma, wire)` (`RZ(alpha) RY(beta) RZ(gamma)`).
-Neither one decides Haar vs. naive itself — each `circuit_set` branch
-either derives its angles via `haar_reparam.euler_angles`/`sample_canonical`
-(33/34) or passes its raw `Uniform(0, 2*pi)` parameters straight through
-unchanged (35/36) before calling them. `two_designs/range_connectivity.py`'s
-`draw_display_circuit` uses the same two primitives directly, for the same
-reason — every gate there is independent, with no earlier gate's dressing
-to inherit, so it always builds a full, standalone block.
+**Circuit 33** is the ablation: the identical gate structure, but raw
+`Uniform(0, 2*pi)` parameters go straight into `local_su2`/`core_kak` with
+no `haar_reparam` call at all — no Bloch-sphere correction on the local
+angles, no Rosenblatt transform on the canonical ones. It exists purely so
+`frame_potential` can quantify what the reparametrization buys you, by
+comparing the two directly:
 
 ```bash
-python run.py frame-potential --circuits 33 --n-qubits 2 --reps 1 --t 1 2 3 --device cpu
+python run.py frame-potential --circuits 33 34 --n-qubits 2 --reps 3 --t 1 2 3 --device cpu
 python run.py frame-potential --circuits 34 --n-qubits 6 --reps 1 2 4 --t 2 --device cpu
 ```
+
+`F^(1)` is a weak invariant and matches Haar for both (local Haar averaging
+alone already gives a 1-design) — the reparametrization's effect only
+shows up from `F^(2)` on: at `t=3, n_qubits=2, reps=3`, circuit 34's
+`F/F_Haar` ratio is ~1.002 versus circuit 33's ~1.05, a ~20x larger
+deviation from Haar, growing with `t`.
+
+Neither circuit spends the paper's literal `15` parameters per gate.
+Every layer applies ONE upfront (Haar-random for 34, raw for 33)
+`local_su2` dressing per wire before any 2-qubit gate at all, and every
+gate from then on — every layer, every pair — reads only a truncated
+9-parameter block (`core_kak` + both *trailing* `local_su2` calls, no
+leading dressing). A gate's leading dressing would just be a second,
+independent local rotation stacked on whatever's already on that wire —
+for circuit 34 specifically, already Haar-random by the upfront layer or
+an earlier gate's trailing dressing, and composing with anything
+independent leaves it Haar-random, so it's redundant, not merely
+approximable away. `weight_tensor_shape` for both is `(reps, num_wires//2,
+3, 3)`: `params[layer, pair, :2]` is both wires' local dressing (2 rows of
+3), read only at layer 0; `params[layer, pair, 2]` is the canonical core's
+3 parameters, read at every layer ≥ 1 alongside the trailing dressing.
+
+One quirk worth knowing about specifically at `n_qubits=2`: the
+alternating-offset brick pattern's per-layer gate count is `[1, 0, 1, 0,
+...]` there (see `circuits._brickwork_layer_pairs`) — layer 0 is always
+dressing-only by construction, and layer 1 happens to be an *odd* layer
+that fires zero gates at this qubit count, so `reps=1` or `2` only ever
+apply local dressings, no canonical core at all. `reps=3` is the smallest
+value that actually applies one real 2-qubit gate — that's why the
+examples above use it.
 
 `two_designs/haar_reparam.py`'s tables (`two_designs/kak1_rosenblatt_tables.npz`,
 checked into the repo) were built from 50,000 Haar-random `SU(4)` samples;
 regenerate with `python two_designs/haar_reparam.py --build [--n-samples N]`
-(needs `scipy`, offline only — not a runtime dependency). Calibration checks
-for circuits 33/34 — including an explicit check for the convergence-loop
-pitfall described under "Checks" below — live in `checks/validate_local_random.py`,
-run via `python check.py validate --only local-random` (or the short alias
-`--only b`).
+(needs `scipy`, offline only — not a runtime dependency). Calibration
+checks for circuit 34 — including an explicit check for the
+convergence-loop pitfall described under "Checks" below — live in
+`checks/validate_local_random.py`, run via `python check.py validate
+--only local-random` (or the short alias `--only b`).
 
-**Circuits 35/36** are the ablation: the exact same gate structure as 33/34
-(same `core_kak`, same 4 local `SU(2)` blocks, same parameter count), but
-the raw `Uniform(0, 2*pi)` parameters are used directly as gate angles
-instead of being pushed through `haar_reparam` — no Bloch-sphere correction
-on the local angles, no Rosenblatt transform on the 3 non-local ones. They
-exist purely so `frame_potential` can quantify what the reparametrization
-buys you, by comparing 33 against 35 (and 34 against 36) directly:
-
-```bash
-python run.py frame-potential --circuits 33 35 --n-qubits 2 --reps 1 --t 1 2 3 --device cpu
-```
-
-`F^(1)` is a weak invariant and matches Haar for both (local Haar averaging
-alone already gives a 1-design) — the reparametrization's effect only shows
-up from `F^(2)` on: at `t=3`, circuit 33's `F/F_Haar` ratio is ~1.002 versus
-circuit 35's ~1.05, a ~20x larger deviation from Haar, growing with `t`.
+`two_designs/range_connectivity.py`'s `draw_display_circuit` uses the same
+two primitives directly, for a different reason than either circuit above:
+every gate there is independent, with no earlier gate's dressing to
+inherit, so it always builds a full, standalone (both-sides-dressed)
+block rather than relying on an upfront layer.
 
 ### `two_designs/`: ensembles from the "Building 2-Designs" notes
 
@@ -294,7 +284,7 @@ stopping rule, worth knowing about for any near-exact-design ensemble, not
 specific to Cliffords.
 
 **Range-limited connectivity** (`two_designs/range_connectivity.py`) —
-same exact-Haar KAK1 block as circuits 33/34, same gate count, but each
+same exact-Haar KAK1 block as circuit 34, same gate count, but each
 layer wires up a *fresh random* pairing of qubits instead of circuit 34's
 fixed nearest-neighbour brickwork, restricted to pairs at most `max_range`
 apart on a line of qubits (`|i - j| <= max_range`). `max_range = 1` is
@@ -311,7 +301,7 @@ angles — see `frame_potential.sample_unitaries`). Retracing circuits.py's
 PennyLane queue per sample turned out to dominate runtime completely once
 measured, so `sample_range_connected_unitaries` instead calls
 `haar_reparam.kak1_block_matrix` — a direct, PennyLane-free reimplementation
-of circuit 33's exact math (verified against `qml.matrix()` to machine
+of circuit 34's exact math (verified against `qml.matrix()` to machine
 precision) — and embeds it at each drawn wire pair via
 `frame_potential.apply_embedded_gate` (promoted from a `circuit_set`-internal
 helper to a shared utility for exactly this reason).
@@ -404,10 +394,10 @@ stopping rule itself, not of either ensemble. It stops when
 `fidelity_error <= rel_tol * |delta|` (or an absolute floor). For any
 ensemble that's *supposed* to be at or near the Haar value — an exact
 design like the Clifford group, or an intentionally-Haar-exact block like
-circuit 33 — `delta` is small by construction, so the relative target
+circuit 34 — `delta` is small by construction, so the relative target
 shrinks about as fast as sampling can shrink `fidelity_error`, and the loop
 burns every `max_batches` without ever satisfying its own criterion
-(confirmed for both: ~13s / ~190M pairs on circuit 33 at n_qubits=2 alone).
+(confirmed for both: ~13s / ~190M pairs on circuit 34 at n_qubits=2 alone).
 Both checks use `estimate_once`/`estimate_once_from_sampler` with a fixed
 sample count instead — the right tool whenever you already expect
 `delta ≈ 0`, since there's no target to converge *towards*, just a spread
