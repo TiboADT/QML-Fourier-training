@@ -16,6 +16,11 @@ Quick frame-potential check:
 
 Full frame-potential sweep, converged:
     python run.py frame-potential --circuits 1-19 --n-qubits 6 --reps 1 2 3 --t 2 --converge --seed 0
+
+Compare architectures at a matched parameter budget instead of matched reps
+(each circuit sweeps its own reps=1,2,3,... until circuits.n_trainable
+would exceed the budget):
+    python run.py frame-potential --circuits 1 18 34 --n-qubits 6 --max-params 100 --t 2
 """
 
 import argparse
@@ -25,6 +30,7 @@ from itertools import product
 import torch
 
 import frame_potential as fp
+from circuits import n_trainable
 
 
 def parse_circuits(values):
@@ -115,7 +121,16 @@ def add_frame_potential_parser(sub):
     p.add_argument("--circuits", type=str, nargs="+", default=["1-19"],
                     help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated)")
     p.add_argument("--n-qubits", type=int, default=6)
-    p.add_argument("--reps", type=int, nargs="+", default=[1, 2, 3])
+    p.add_argument("--reps", type=int, nargs="+", default=None,
+                    help="ansatz repetitions to sweep (default: 1 2 3). Mutually "
+                         "exclusive with --max-params.")
+    p.add_argument("--max-params", type=int, default=None,
+                    help="instead of a fixed --reps list, sweep reps=1,2,3,... "
+                         "*per circuit* for as long as circuits.n_trainable(num, "
+                         "n_qubits, reps) stays within this budget -- lets "
+                         "architectures with very different params-per-rep be "
+                         "compared at a matched parameter count instead of a "
+                         "matched rep count. Mutually exclusive with --reps.")
     p.add_argument("--t", type=int, nargs="+", default=[2])
     p.add_argument("--n-samples", type=int, default=None,
                     help="samples per batch (default: 2**n_qubits * t)")
@@ -134,18 +149,55 @@ def add_frame_potential_parser(sub):
     return p
 
 
+def reps_for_param_budget(num, n_qubits, max_params):
+    """All reps = 1, 2, 3, ... whose circuits.n_trainable(num, n_qubits, reps)
+    stays at or under max_params -- not the raw allocated weight-tensor size
+    (several circuits don't read all of it, see n_trainable's own docstring),
+    so circuits compared at the same max_params are matched on real degrees
+    of freedom. Returns the full list (not just the largest reps) so a sweep
+    shows how F^(t) evolves with depth up to the budget, not just the
+    endpoint. Empty if even reps=1 already exceeds max_params."""
+    reps_list = []
+    reps = 1
+    while True:
+        if n_trainable(num, n_qubits, reps) > max_params:
+            break
+        reps_list.append(reps)
+        reps += 1
+    return reps_list
+
+
 def cmd_frame_potential(args):
+    if args.reps is not None and args.max_params is not None:
+        raise SystemExit("--reps and --max-params are mutually exclusive -- give "
+                          "a fixed rep count or a parameter budget, not both.")
+
     circuits = parse_circuits(args.circuits)
     device = torch.device(args.device) if args.device else fp.get_device()
     dtype = torch.complex64 if args.dtype == "complex64" else torch.complex128
     generator = torch.Generator().manual_seed(args.seed) if args.seed is not None else None
 
-    print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
-          f"reps={args.reps} t={args.t} converge={args.converge}")
+    if args.max_params is not None:
+        combos = []
+        for num in circuits:
+            reps_list = reps_for_param_budget(num, args.n_qubits, args.max_params)
+            if not reps_list:
+                print(f"  circuit {num}: skipped -- even reps=1 already has "
+                      f"{n_trainable(num, args.n_qubits, 1)} trainable parameters, "
+                      f"over --max-params {args.max_params}")
+                continue
+            combos.extend(product([num], reps_list, args.t))
+        print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
+              f"max_params={args.max_params} t={args.t} converge={args.converge}")
+    else:
+        reps_list = args.reps if args.reps is not None else [1, 2, 3]
+        combos = list(product(circuits, reps_list, args.t))
+        print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
+              f"reps={reps_list} t={args.t} converge={args.converge}")
 
-    n_runs = len(circuits) * len(args.reps) * len(args.t)
+    n_runs = len(combos)
     t0 = time.time()
-    for i, (num, reps, t) in enumerate(product(circuits, args.reps, args.t), start=1):
+    for i, (num, reps, t) in enumerate(combos, start=1):
         run_t0 = time.time()
         if args.converge:
             est = fp.estimate_until_converged(

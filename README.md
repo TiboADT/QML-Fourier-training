@@ -131,6 +131,9 @@ python run.py frame-potential --circuits 7 --n-qubits 4 --reps 1 --t 2 --device 
 
 # real sweep over the 19 paper architectures, converged
 python run.py frame-potential --circuits 1-19 --n-qubits 6 --reps 1 2 3 --t 2 --converge --seed 0
+
+# compare architectures at a matched *parameter* budget instead of matched reps
+python run.py frame-potential --circuits 1 18 34 --n-qubits 6 --max-params 100 --t 2
 ```
 
 `--circuits` accepts individual numbers and ranges (`1-19`), mixable and
@@ -138,6 +141,19 @@ space-separated. `--converge` uses `estimate_until_converged` instead of a
 single batch — that's what you want for real numbers; without it you get
 one batch of `--n-samples` (default `2**n_qubits * t`). `--device` defaults
 to CUDA if available, else CPU; `--out` defaults to `results/frame_potential.csv`.
+
+`--max-params N` replaces `--reps` (mutually exclusive with it): different
+architectures spend wildly different numbers of trainable parameters per
+rep, so a fixed `--reps` list isn't a fair comparison across them. With
+`--max-params`, each circuit instead sweeps `reps=1,2,3,...` on its own,
+checking `circuits.n_trainable` (the actual used count, not the raw
+allocated weight-tensor size — see that function's docstring) at every
+step, and stops once the next rep would exceed the budget — so every
+circuit's last reported reps is its own best match to the same budget,
+and the rows along the way show how `F^(t)` evolves with depth up to it.
+A circuit whose `reps=1` already exceeds the budget is skipped with a
+printed warning rather than silently producing nothing.
+
 Run `python run.py frame-potential --help` for the full flag list.
 
 (`train` and `frame-potential` are subcommands of the same `run.py` entry
