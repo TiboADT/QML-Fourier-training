@@ -6,3 +6,4 @@ archive_results/
 output.log
 *.gif
 *.png
+.vscode/

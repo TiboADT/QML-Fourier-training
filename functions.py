@@ -24,6 +24,14 @@ def cost_model(model):
 
 
 def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step=10, display=True):
+    """`model` (from build_model) counts expectation-value estimates as it's
+    called -- see build_model's counted_circuit. That count is exact for
+    training done here specifically because this device+interface
+    combination resolves to backprop differentiation: .backward() reuses
+    the one forward pass's autodiff graph rather than triggering further
+    device executions, so every expectation value genuinely estimated
+    corresponds to exactly one `model(weights, x)` call below (never a
+    hidden multiple, the way parameter-shift gradients would need)."""
     weights = weights.detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([weights], lr = 0.1)
     cost = cost_model(model)
@@ -84,7 +92,19 @@ def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit 
 
         return qp.expval(qp.PauliZ(wires=measuring_qubit))
 
-    return circuit, weights
+    # Every call above is one simulated device execution, but (thanks to
+    # PennyLane's parameter broadcasting) it covers x.shape[0] independent
+    # expectation-value estimates at once -- on real hardware that would be
+    # x.shape[0] separate circuit runs, not one. A step count doesn't
+    # reflect this: it's the same whether batch_size is 10 or 1000, and
+    # doesn't vary with n_qubits/circuit depth either. This does (no
+    # additional device executions are hiding inside .backward()).
+    def counted_circuit(weights, x):
+        counted_circuit.n_expvals += x.shape[0]
+        return circuit(weights, x)
+    counted_circuit.n_expvals = 0
+
+    return counted_circuit, weights
 
 
 def show_results(model,weights, x, target_y, cst, title="Results"):

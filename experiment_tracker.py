@@ -25,6 +25,7 @@ EXPERIMENTS_FIELDS = [
     "n_train_samples",
     "max_steps",
     "batch_size",
+    "n_expvals",
     "final_cost",
     "initial_cost",
     "notes",
@@ -169,6 +170,9 @@ def train_and_record(
         "n_train_samples":  len(x),
         "max_steps":        max_steps,
         "batch_size":       batch_size,
+        # How many times the (simulated) quantum circuit's expectation value
+        # was actually estimated over the whole run.
+        "n_expvals":        getattr(model, "n_expvals", None),
         "initial_cost":     round(float(cst[0].item()), 8),
         "final_cost":       round(float(cst[-1].item()), 8),
         "notes":            notes,

@@ -54,7 +54,14 @@ train_and_record(x, y, circuit_num=7, n_qubits=6, layers=3, anzats_reps=1,
 
 Every run appends a row to `results/experiments.csv` (`n_params` is the
 number of parameters the circuit actually reads, not the raw tensor size —
-see `n_trainable` in `circuits.py`) and saves its cost curve to
+see `n_trainable` in `circuits.py`; `n_expvals` is the number of times the
+circuit's expectation value was actually estimated over the whole run --
+see `build_model`'s `counted_circuit` in `functions.py` -- a more honest cost
+metric than `max_steps`, since unlike a step count it scales with
+`batch_size` and `n_train_samples` too, the way the real quantum-resource
+cost does; with the defaults above it's dominated by the two full-dataset
+`cost(...)` calls per step used for logging, not the batched gradient step
+itself) and saves its cost curve to
 `results/costs/{experiment_id}.npy` — one small binary file per run, so a
 run's `max_steps` never has to match any other run's, and nothing repeats
 the experiment id or step index the way a CSV would need to. Load one curve

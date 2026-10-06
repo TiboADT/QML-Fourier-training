@@ -578,15 +578,15 @@ def circuit_set(name: str = None, num: int = None):
             num_wires = len(wires)
             num_layers, num_pairs = params.shape[0], params.shape[1]
             wires_parity = 1 - (num_wires % 2)
-            for wire_paire in range(num_pairs):
-                local_su2(params[0, wire_paire, :2], wires=[wires[2 * wire_paire], wires[2 * wire_paire + 1]])
-            for layer in range(1,num_layers):
+            for layer in range(num_layers-1):
                 layer_pairs = num_pairs - layer % 2 * wires_parity
                 layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
                 for i in range(layer_pairs):
-                    core_kak(*params[layer, i, 2], [layer_wires[2 * i], layer_wires[2 * i + 1]])
-                for i in range(layer_pairs):
                     local_su2(params[layer, i, :2], wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
+                for i in range(layer_pairs):
+                    core_kak(*params[layer, i, 2], [layer_wires[2 * i], layer_wires[2 * i + 1]])
+            for wire_paire in range(num_pairs):
+                local_su2(params[num_layers-1, wire_paire, :2], wires=[wires[2 * wire_paire], wires[2 * wire_paire + 1]])
 
         return KAK
 
@@ -610,19 +610,19 @@ def circuit_set(name: str = None, num: int = None):
             num_wires = len(wires)
             num_layers, num_pairs = params.shape[0], params.shape[1]
             wires_parity = 1 - (num_wires % 2)
-            for wire_paire in range(num_pairs):
-                local_su2(haar_su2_params(params[0, wire_paire, :2]),
-                          wires=[wires[2 * wire_paire], wires[2 * wire_paire + 1]])
-            for layer in range(1,num_layers):
+            for layer in range(num_layers-1):
                 layer_pairs = num_pairs - layer % 2 * wires_parity
                 layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
+                for i in range(layer_pairs):
+                    local_su2(haar_su2_params(params[layer, i, :2]),
+                              wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
                 for i in range(layer_pairs):
                     u = params[layer, i, 2] / (2 * torch.pi)
                     core_kak(*haar_reparam.sample_canonical(u[0], u[1], u[2]),
                              [layer_wires[2 * i], layer_wires[2 * i + 1]])
-                for i in range(layer_pairs):
-                    local_su2(haar_su2_params(params[layer, i, :2]),
-                              wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
+            for wire_paire in range(num_pairs):
+                local_su2(haar_su2_params(params[num_layers-1, wire_paire, :2]),
+                          wires=[wires[2 * wire_paire], wires[2 * wire_paire + 1]])
 
         return kak1_haar
 
