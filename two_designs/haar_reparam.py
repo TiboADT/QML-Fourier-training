@@ -82,6 +82,7 @@ different circuit convention.
 
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -280,7 +281,8 @@ def kak1_block_matrix(raw15: torch.Tensor) -> torch.Tensor:
     core = cnot10 @ core
     core = _embed_q0(_ry_matrix(ty2)) @ core
     core = cnot01 @ core
-    core = core * torch.exp(1j * torch.tensor(torch.pi / 4, dtype=torch.complex128))
+    
+    core = core * complex(math.cos(math.pi / 4), math.sin(math.pi / 4))
 
     return _embed_q0(B1) @ _embed_q1(B0) @ core @ _embed_q0(A1) @ _embed_q1(A0)
 

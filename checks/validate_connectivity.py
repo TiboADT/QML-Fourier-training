@@ -49,7 +49,8 @@ def check_sane(n_qubits=4, reps=8, t=2, n_samples=1500, samples_per_wiring=100):
     U = sample_range_connected_unitaries(n_qubits, reps, max_range, batch_size=4,
                                           dtype=torch.complex128, samples_per_wiring=4)
     d = 2 ** n_qubits
-    unit_err = (U.conj().transpose(-1, -2) @ U - torch.eye(d, dtype=torch.complex128)).abs().max().item()
+    unit_err = (U.conj().transpose(-1, -2) @ U
+                - torch.eye(d, dtype=torch.complex128, device=U.device)).abs().max().item()
     det_err = (torch.linalg.det(U).abs() - 1).abs().max().item()
     print(f"  unitarity error={unit_err:.2e}  |det|-1 error={det_err:.2e}")
 

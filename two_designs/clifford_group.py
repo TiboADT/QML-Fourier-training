@@ -119,8 +119,8 @@ def exact_estimate_from_group(unitaries: torch.Tensor, t: int, *, row_chunk: int
     N, d, _ = unitaries.shape
     accum_dtype = torch.float64
     Uc = unitaries.conj()
-    total = torch.zeros((), dtype=accum_dtype)
-    sum_sq = torch.zeros((), dtype=accum_dtype)
+    total = torch.zeros((), dtype=accum_dtype, device=unitaries.device)
+    sum_sq = torch.zeros((), dtype=accum_dtype, device=unitaries.device)
     for start in range(0, N, row_chunk):
         block = Uc[start:start + row_chunk]  # (b, d, d)
         traces = torch.einsum("bij,kij->bk", block, unitaries)  # (b, N)
