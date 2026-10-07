@@ -424,8 +424,9 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
     )
 
 
-def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None) -> str:
-    header = f"circuit {circuit_num}, n_qubits={n_qubits}" if circuit_num is not None else ""
+
+def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None, reps: int = None) -> str:
+    header = f"circuit {circuit_num}, n_qubits={n_qubits}, reps={reps}" if circuit_num is not None else ""
     return (
         f"{header}\n"
         f"  F^({est.t}) (ansatz) : {est.frame_potential:.6f}\n"

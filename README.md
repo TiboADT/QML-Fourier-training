@@ -29,7 +29,9 @@ compared to the Haar reference `F/F_Haar`).
   as opposed to run.py's repeatable experiments — see "Checks" below.
 - `notebooks/`: `building_circuits.ipynb` (circuit sanity checks),
   `Fourier.ipynb`/`training_and_saving.ipynb` (training), `post_processing.ipynb`
-  (plots from `results/experiments.csv`).
+  (plots from `results/experiments.csv`), `frame_potential_post_processing.ipynb`
+  (plots from `results/frame_potential.csv` -- frame potential vs. number of
+  parameters, the same comparison as the paper's Fig. 2a).
 
 ## Install
 
@@ -153,6 +155,18 @@ circuit's last reported reps is its own best match to the same budget,
 and the rows along the way show how `F^(t)` evolves with depth up to it.
 A circuit whose `reps=1` already exceeds the budget is skipped with a
 printed warning rather than silently producing nothing.
+
+With `--converge`, a reps sweep (from either `--reps` or `--max-params`)
+also stops early per `(circuit, t)` once `estimate_until_converged`
+exhausts `--max-batches` without satisfying its own stopping rule — the
+known relative-tolerance pathology from "Checks" below, where `delta` is
+already small enough that the `rel_tol * delta` target shrinks about as
+fast as sampling can shrink `fidelity_error`. Since more reps only pushes
+`F^(t)` closer to Haar (shrinking `delta` further), every larger reps for
+that same `(circuit, t)` would hit exactly the same wall, so they're
+skipped with a printed note instead of each burning another full
+`--max-batches` for no new information; raise `--max-batches` if you
+actually need a tighter bound there.
 
 Run `python run.py frame-potential --help` for the full flag list.
 

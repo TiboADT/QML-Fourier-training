@@ -167,6 +167,18 @@ def reps_for_param_budget(num, n_qubits, max_params):
     return reps_list
 
 
+def _converged(est, rel_tol, min_abs_error=1e-5):
+    """Re-derive whether estimate_until_converged's own stopping criterion
+    was actually satisfied -- it returns only the final (possibly
+    max_batches-exhausted) Estimate, not a flag saying which happened.
+    Same formula as checks/validate_local_random.py's
+    check_convergence_pathology; min_abs_error matches
+    estimate_until_converged's own default since run.py doesn't expose
+    that one as a flag."""
+    target = abs(rel_tol * est.delta)
+    return est.fidelity_error <= target or est.fidelity_error <= min_abs_error
+
+
 def cmd_frame_potential(args):
     if args.reps is not None and args.max_params is not None:
         raise SystemExit("--reps and --max-params are mutually exclusive -- give "
@@ -195,9 +207,26 @@ def cmd_frame_potential(args):
         print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
               f"reps={reps_list} t={args.t} converge={args.converge}")
 
+    # (num, t) pairs where a smaller reps already exhausted --max-batches
+    # without satisfying estimate_until_converged's own stopping rule.
+    # combos is built with reps non-decreasing for any fixed (num, t) (both
+    # branches above sweep reps in increasing order per circuit), so once a
+    # pair lands here every later occurrence is a strictly larger reps --
+    # safe to skip: more reps can only move F^(t) closer to Haar, shrinking
+    # delta further, which only makes the (already unmet) rel_tol*delta
+    # target harder to hit, never easier. Re-running would just burn
+    # another full --max-batches for no new information.
+    stuck = set()
+
     n_runs = len(combos)
     t0 = time.time()
     for i, (num, reps, t) in enumerate(combos, start=1):
+        if args.converge and (num, t) in stuck:
+            print(f"[{i}/{n_runs}] skipped: circuit {num} (t={t}) already exhausted "
+                  f"--max-batches={args.max_batches} without converging at a smaller reps -- "
+                  "more reps won't change that, only raising --max-batches would.")
+            continue
+
         run_t0 = time.time()
         if args.converge:
             est = fp.estimate_until_converged(
@@ -205,6 +234,8 @@ def cmd_frame_potential(args):
                 n_samples=args.n_samples, rel_tol=args.rel_tol, max_batches=args.max_batches,
                 device=device, dtype=dtype, generator=generator, verbose=not args.quiet,
             )
+            if not _converged(est, args.rel_tol):
+                stuck.add((num, t))
         else:
             n_samples = args.n_samples or (2 ** args.n_qubits * t)
             est = fp.estimate_once(
@@ -215,7 +246,7 @@ def cmd_frame_potential(args):
                           device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
         if not args.quiet:
             print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) \n" +
-                  fp.report(est, circuit_num=num, n_qubits=args.n_qubits))
+                  fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps))
 
     print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
 
