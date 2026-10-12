@@ -2,8 +2,8 @@ __pycache__
 results/
 archive_results/
 .venv/
-*.sh
 output.log
 *.gif
 *.png
 .vscode/
+*.out

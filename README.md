@@ -25,6 +25,8 @@ compared to the Haar reference `F/F_Haar`).
   and `frame-potential` subcommands). Retires the old `test.py` (hardcoded
   constants, no CLI, no seeding) — `run.py train` reproduces the same sweep
   with proper flags and best-effort seeding.
+- `run_background.sh`: launches `run.py` detached from the terminal (for a
+  remote machine / long sweep) — see "Remote / background runs" below.
 - `check.py` / `checks/`: CLI for one-off validation and benchmark scripts,
   as opposed to run.py's repeatable experiments — see "Checks" below.
 - `notebooks/`: `building_circuits.ipynb` (circuit sanity checks),
@@ -493,6 +495,66 @@ Qubit counts above ~8 get noticeably slower on CPU — the unitary
 construction is memory-bandwidth-bound, which is exactly where a GPU (much
 higher bandwidth) pays off; correctness doesn't depend on which device you use.
 
+## Remote / background runs
+
+`run_background.sh` launches `run.py train` or `run.py frame-potential` detached
+from the terminal (`nohup` + `disown`), so a sweep on a remote machine survives
+you closing the connection — the same pattern as this project's old `test.sh`,
+just pointed at `run.py`'s subcommands instead of a hardcoded sweep, with a
+few safety additions layered on:
+
+```bash
+./run_background.sh train --circuits 1-19 --n-qubits 6 --layers 3 --max-steps 600
+./run_background.sh frame-potential --circuits 1-19 --n-qubits 6 --converge
+./run_background.sh                 # no subcommand -> prompts for train/frame-potential
+./run_background.sh --help          # this script's own usage
+./run_background.sh train --help    # run.py train's own --help (foreground, not backgrounded)
+```
+
+Everything after the subcommand is forwarded straight to `run.py` — this
+script only adds the background-launch wrapper, not argument parsing, so
+`run.py <subcommand> --help` is still the source of truth for what's
+available. Logs and PID files land in `results/logs/<command>_<timestamp>.{log,pid}`
+(timestamped so repeated or concurrent launches never clobber each other's
+log, unlike the old script's fixed `output.log`). It also watches the
+process for its first ~25s and shows you the log immediately if it dies on
+startup (a bad flag, a missing module) — a backgrounded, disowned process
+that crashes immediately otherwise gives zero feedback in the terminal; you'd
+only find out by thinking to check the log yourself, possibly much later.
+
+**Risks and recommendations for this kind of processing**, since `nohup` +
+`disown` is deliberately minimal — there's no scheduler, no queueing, no
+resource limits, nothing most HPC job systems (SLURM etc.) give you for free:
+
+- **It survives a dropped connection, not a dead machine.** `nohup`/`disown`
+  specifically protect against your terminal/SSH session ending — they do
+  nothing if the remote machine itself reboots or crashes. For a run long
+  enough that this matters, that risk doesn't go away just because the
+  process is backgrounded.
+- **Nothing stops you from launching the same GPU job twice.** Unlike a
+  scheduler, there's no awareness of what else is already running — two
+  concurrent GPU runs will compete for the same memory. `frame_potential.py`'s
+  OOM backoff (see `estimate_once_from_sampler`) makes this *recoverable*
+  rather than a hard crash, but it's still wasted time. Check `results/logs/*.pid`
+  (or `nvidia-smi`) for an already-running job before starting another.
+- **Concurrent runs writing to the *same* `--out` file is a real risk, not
+  just a theoretical one, especially on an NFS-mounted home directory**
+  (common on shared clusters) where concurrent small writes aren't
+  guaranteed atomic the way they more often are on a local disk. Give
+  concurrent runs different `--out` paths.
+- **A disowned job is easy to forget about.** `disown` removes it from your
+  shell's job table, so `jobs` won't list it and closing the terminal won't
+  prompt you about it either — on a shared machine, a forgotten run quietly
+  holds GPU/CPU/RAM another user might need. The PID file this script writes
+  exists so you have something concrete to check back on and `kill` once
+  you're done with it, not just a PID you saw scroll past once.
+- **Editing code while a run is in progress is safe** — Python has already
+  loaded everything it needs into memory by the time the computation starts,
+  so changing files on disk afterward doesn't affect the running process.
+  Combined with `save_estimate`'s git-commit stamping (every saved row
+  records the commit it was produced by), you can keep working and still
+  know exactly what code produced a given result later, even if you'd since
+  moved on to something else.
 
 ### Generative IA Usage
 
