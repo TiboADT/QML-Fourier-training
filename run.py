@@ -53,9 +53,20 @@ def add_train_parser(sub):
                     help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated)")
     p.add_argument("--n-qubits", type=int, nargs="+", default=[6])
     p.add_argument("--layers", type=int, nargs="+", default=[3],
-                    help="number of data-reuploading layers")
-    p.add_argument("--reps", type=int, nargs="+", default=[1, 2, 3],
-                    help="ansatz repetitions per layer (anzats_reps)")
+                    help="number of data-reuploading layers -- stays fixed per sweep "
+                         "point even with --max-params (see --max-params); it's the "
+                         "reps budget-sweep that mirrors frame-potential's, not layers")
+    p.add_argument("--reps", type=int, nargs="+", default=None,
+                    help="ansatz repetitions per layer (anzats_reps) to sweep "
+                         "(default: 1 2 3). Mutually exclusive with --max-params.")
+    p.add_argument("--max-params", type=int, default=None,
+                    help="instead of a fixed --reps list, sweep reps=1,2,3,... "
+                         "*per circuit* (at each fixed --layers value) for as long "
+                         "as layers * circuits.n_trainable(num, n_qubits, reps) "
+                         "stays within this budget -- same idea as "
+                         "frame-potential's --max-params, so a circuit's training "
+                         "cost and its F^(t) can be compared at matched parameter "
+                         "counts instead of matched reps. Mutually exclusive with --reps.")
     p.add_argument("--degrees", type=int, nargs="+", default=[10],
                     help="degree(s) of the target Fourier series")
     p.add_argument("--n-functions", type=int, default=5,
@@ -83,11 +94,39 @@ def cmd_train(args):
         pnp.random.seed(args.seed)
         torch.manual_seed(args.seed)
 
+    if args.reps is not None and args.max_params is not None:
+        raise SystemExit("--reps and --max-params are mutually exclusive -- give "
+                          "a fixed rep list or a parameter budget, not both.")
+
     circuits = parse_circuits(args.circuits)
-    combos = list(product(args.n_qubits, args.layers, args.reps, circuits))
+
+    if args.max_params is not None:
+        # layers stays fixed per sweep point (the outer loop below); only
+        # reps is budget-driven, same as frame-potential's --max-params --
+        # see reps_for_param_budget's docstring for why layers is the
+        # multiplier rather than another budget-swept dimension.
+        combos = []
+        for n_qubits in args.n_qubits:
+            for layers in args.layers:
+                for num in circuits:
+                    reps_list = reps_for_param_budget(num, n_qubits, args.max_params, multiplier=layers)
+                    if not reps_list:
+                        print(f"  circuit {num} (n_qubits={n_qubits}, layers={layers}): skipped -- "
+                              f"even reps=1 already has {layers * n_trainable(num, n_qubits, 1)} "
+                              f"trainable parameters, over --max-params {args.max_params}")
+                        continue
+                    combos.extend((n_qubits, layers, reps, num) for reps in reps_list)
+        print(f"degrees={args.degrees} n_functions={args.n_functions} circuits={circuits} "
+              f"n_qubits={args.n_qubits} layers={args.layers} max_params={args.max_params} "
+              f"-> {len(combos)} (n_qubits, layers, reps, circuit) combos")
+    else:
+        reps_list = args.reps if args.reps is not None else [1, 2, 3]
+        combos = list(product(args.n_qubits, args.layers, reps_list, circuits))
+        print(f"degrees={args.degrees} n_functions={args.n_functions} circuits={circuits} "
+              f"n_qubits={args.n_qubits} layers={args.layers} reps={reps_list} -> "
+              f"{len(combos)} (n_qubits, layers, reps, circuit) combos")
+
     n_runs = len(args.degrees) * args.n_functions * len(combos)
-    print(f"degrees={args.degrees} n_functions={args.n_functions} circuits={circuits} "
-          f"n_qubits={args.n_qubits} layers={args.layers} reps={args.reps} -> {n_runs} runs")
 
     t0 = time.time()
     run_i = 0
@@ -149,18 +188,27 @@ def add_frame_potential_parser(sub):
     return p
 
 
-def reps_for_param_budget(num, n_qubits, max_params):
-    """All reps = 1, 2, 3, ... whose circuits.n_trainable(num, n_qubits, reps)
-    stays at or under max_params -- not the raw allocated weight-tensor size
-    (several circuits don't read all of it, see n_trainable's own docstring),
-    so circuits compared at the same max_params are matched on real degrees
-    of freedom. Returns the full list (not just the largest reps) so a sweep
-    shows how F^(t) evolves with depth up to the budget, not just the
-    endpoint. Empty if even reps=1 already exceeds max_params."""
+def reps_for_param_budget(num, n_qubits, max_params, multiplier=1):
+    """All reps = 1, 2, 3, ... whose multiplier * circuits.n_trainable(num,
+    n_qubits, reps) stays at or under max_params -- not the raw allocated
+    weight-tensor size (several circuits don't read all of it, see
+    n_trainable's own docstring), so circuits compared at the same
+    max_params are matched on real degrees of freedom. Returns the full
+    list (not just the largest reps) so a sweep shows how F^(t) (or the
+    training cost) evolves with depth up to the budget, not just the
+    endpoint. Empty if even reps=1 already exceeds max_params.
+
+    `multiplier` is 1 for frame-potential (no layers concept there -- see
+    frame_potential.sample_unitaries, it's just circuit_set(num, reps)) and
+    `layers` for training (build_model stacks `layers` independent copies
+    of the same reps-parametrized block, each with its own weights -- see
+    experiment_tracker.py's n_params = layers * n_trainable(...) -- so the
+    *total* trainable-parameter count a training run actually has is that
+    product, not n_trainable alone)."""
     reps_list = []
     reps = 1
     while True:
-        if n_trainable(num, n_qubits, reps) > max_params:
+        if multiplier * n_trainable(num, n_qubits, reps) > max_params:
             break
         reps_list.append(reps)
         reps += 1
