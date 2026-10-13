@@ -27,13 +27,18 @@ compared to the Haar reference `F/F_Haar`).
   with proper flags and best-effort seeding.
 - `run_background.sh`: launches `run.py` detached from the terminal (for a
   remote machine / long sweep) — see "Remote / background runs" below.
+- `pull_remote_results.sh`: rsyncs `results/` from a remote machine down to
+  `results/remote/` — gitignored (personal ssh path), see "Remote /
+  background runs" below.
 - `check.py` / `checks/`: CLI for one-off validation and benchmark scripts,
   as opposed to run.py's repeatable experiments — see "Checks" below.
 - `notebooks/`: `building_circuits.ipynb` (circuit sanity checks),
   `Fourier.ipynb`/`training_and_saving.ipynb` (training), `post_processing.ipynb`
-  (plots from `results/experiments.csv`), `frame_potential_post_processing.ipynb`
-  (plots from `results/frame_potential.csv` -- frame potential vs. number of
-  parameters, the same comparison as the paper's Fig. 2a).
+  (loads both `results/experiments.csv` and `results/frame_potential.csv`,
+  local and `results/remote/` together -- training performance, frame
+  potential vs. number of parameters [the paper's Fig. 2a comparison], and
+  training performance vs. frame potential, with a correlation analysis of
+  the two as performance indicators).
 
 ## Install
 
@@ -555,6 +560,25 @@ resource limits, nothing most HPC job systems (SLURM etc.) give you for free:
   records the commit it was produced by), you can keep working and still
   know exactly what code produced a given result later, even if you'd since
   moved on to something else.
+
+### Pulling results back
+
+`pull_remote_results.sh` rsyncs a remote `results/` directory down to
+`results/remote/` on this machine:
+
+```bash
+./pull_remote_results.sh            # pull
+./pull_remote_results.sh --dry-run  # show what would be transferred, change nothing
+```
+
+Fill in the `REMOTE` variable at the top of the script (`user@host:/path/to/Circuits_training/results`)
+first; the script is gitignored since that path is personal to your setup,
+unlike `run_background.sh`. It deliberately lands in `results/remote/`
+rather than merging into `results/` directly — `experiments.csv` and
+`frame_potential.csv` are append-only logs, and the local and remote copies
+will usually hold different rows, so overwriting one with the other would
+lose data. `notebooks/post_processing.ipynb` loads both `results/` and
+`results/remote/` and combines them with a `source` column instead.
 
 ### Generative IA Usage
 

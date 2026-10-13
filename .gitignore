@@ -1,9 +1,9 @@
 __pycache__
 results/
-archive_results/
 .venv/
 output.log
 *.gif
 *.png
 .vscode/
 *.out
+pull_remote_results.sh
