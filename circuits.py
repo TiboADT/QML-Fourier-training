@@ -51,18 +51,18 @@ def rx_rz_layer(params, wires):
         qp.RZ(params[i, 1], wires=w)
 
 
-def parametrized_CZ_chain(params, wires):
-    """Apply parametrized CZ (CP) on nearest-neighbor pairs. params shape: (num_wires-1,)"""
+def crz_chain(params, wires):
+    """Apply CRZ (control=wires[i+1], target=wires[i]) on nearest-neighbor
+    pairs. params shape: (num_wires-1,)."""
     for i in range(len(wires) - 1):
-        qp.ControlledPhaseShift(params[i], wires=[wires[i], wires[i + 1]])
+        qp.CRZ(params[i], wires=[wires[i + 1], wires[i]])
 
 
-def parametrized_CX_chain(params, wires):
-    """Apply parametrized CX (H-CP-H) on nearest-neighbor pairs. params shape: (num_wires-1,)"""
+def crx_chain(params, wires):
+    """Apply CRX (control=wires[i+1], target=wires[i]) on nearest-neighbor
+    pairs. params shape: (num_wires-1,). """
     for i in range(len(wires) - 1):
-        qp.Hadamard(wires=wires[i])
-        qp.ControlledPhaseShift(params[i], wires=[wires[i], wires[i + 1]])
-        qp.Hadamard(wires=wires[i])
+        qp.CRX(params[i], wires=[wires[i + 1], wires[i]])
 
 
 def core_kak(tz, ty1, ty2, wires):
@@ -98,12 +98,23 @@ def _brickwork_layer_pairs(num_wires: int, layer: int) -> int:
     return num_pairs - layer % 2 * wires_parity
 
 
-def circuit_set(name: str = None, num: int = None):
+def circuit_set(name: str = None, num: int = None, generic: bool = False):
     """Return a function corresponding to the named or numbered circuit.
 
     Circuits 1–19 are direct translations of the Qiskit circuit_set circuits.
+
+    generic=True: `num` is a 5-digit generic_ansatz code instead of one of
+    the hardcoded numbers below -- see generic_ansatz.py's module
+    docstring for the encoding.
     """
-    
+    if generic:
+        import generic_ansatz
+
+        def generic_circuit(params, wires=None):
+            generic_ansatz.build(num, params, wires=wires)
+
+        return generic_circuit
+
     circuit_names = {
         "Brickwall": 32,
         "StronglyEntangling": 30,
@@ -147,24 +158,24 @@ def circuit_set(name: str = None, num: int = None):
         return circ2
 
     # ------------------------------------------------------------------
-    # Circuit 3: RX-RZ + parametrized CZ chain
-    # params shape: (reps, num_wires, 2) for rotations + (reps, num_wires-1) for CZ angles
+    # Circuit 3: RX-RZ + CRZ chain
+    # params shape: (reps, num_wires, 2) for rotations + (reps, num_wires-1) for CRZ angles
     # Packed as params shape: (reps, 2*num_wires + (num_wires-1))
     # ------------------------------------------------------------------
     elif num == 3:
         def circ3(params, wires=None):
             reps, num_wires = params.shape[0], params.shape[1]  # params: (reps, num_wires, 3)
-            # params[:, :, :2] = RX/RZ angles, params[:, :num_wires-1, 2] = CP angles
+            # params[:, :, :2] = RX/RZ angles, params[:, :num_wires-1, 2] = CRZ angles
             if wires is None:
                 wires = list(range(num_wires))
             for i in range(reps):
                 rx_rz_layer(params[i, :, :2], wires)
-                parametrized_CZ_chain(params[i, :num_wires - 1, 2], wires)
+                crz_chain(params[i, :num_wires - 1, 2], wires)
 
         return circ3
 
     # ------------------------------------------------------------------
-    # Circuit 4: RX-RZ + parametrized CX (H-CP-H) chain
+    # Circuit 4: RX-RZ + CRX chain
     # params shape: (reps, num_wires, 3)  — same layout as circuit 3
     # ------------------------------------------------------------------
     elif num == 4:
@@ -174,14 +185,14 @@ def circuit_set(name: str = None, num: int = None):
                 wires = list(range(num_wires))
             for i in range(reps):
                 rx_rz_layer(params[i, :, :2], wires)
-                parametrized_CX_chain(params[i, :num_wires - 1, 2], wires)
+                crx_chain(params[i, :num_wires - 1, 2], wires)
 
         return circ4
 
     # ------------------------------------------------------------------
-    # Circuit 5: RX-RZ, all-to-all parametrized CZ, RX-RZ
+    # Circuit 5: RX-RZ, all-to-all CRZ, RX-RZ
     # params shape: (reps, num_wires, 4 + num_wires - 1)
-    # Layout per rep: [RX-RZ block] [all-to-all CZ] [RX-RZ block]
+    # Layout per rep: [RX-RZ block] [all-to-all CRZ] [RX-RZ block]
     # Simplified packing: params shape (reps, 4*num_wires + num_wires*(num_wires-1))
     # Here we use explicit named slices for clarity.
     # ------------------------------------------------------------------
@@ -190,7 +201,7 @@ def circuit_set(name: str = None, num: int = None):
             """
             params shape: (reps, num_wires, 2 + (num_wires - 1) + 2)
             params[:, :, 0:2]                      = first RX-RZ block
-            params[:, i, 2:2+(num_wires-1)]        = CP angles for qubit i to all others
+            params[:, i, 2:2+(num_wires-1)]        = CRZ angles for qubit i to all others
             params[:, :, 2+(num_wires-1):]         = second RX-RZ block (2 angles)
             """
             reps, num_wires = params.shape[0], params.shape[1]
@@ -200,12 +211,12 @@ def circuit_set(name: str = None, num: int = None):
             for i in range(reps):
                 # First RX-RZ
                 rx_rz_layer(params[i, :, :2], wires)
-                # All-to-all parametrized CZ
+                # All-to-all CRZ
                 for q in range(num_wires):
                     cp_idx = 0
                     for q2 in range(num_wires):
                         if q2 != q:
-                            qp.ControlledPhaseShift(params[i, q, 2 + cp_idx], wires=[wires[q], wires[q2]])
+                            qp.CRZ(params[i, q, 2 + cp_idx], wires=[wires[q2], wires[q]])
                             cp_idx += 1
                 # Second RX-RZ
                 rx_rz_layer(params[i, :, 2 + n_cp:], wires)
@@ -213,7 +224,7 @@ def circuit_set(name: str = None, num: int = None):
         return circ5
 
     # ------------------------------------------------------------------
-    # Circuit 6: RX-RZ, all-to-all parametrized CX (H-CP-H), RX-RZ
+    # Circuit 6: RX-RZ, all-to-all CRX, RX-RZ
     # Same shape as circuit 5
     # ------------------------------------------------------------------
     elif num == 6:
@@ -228,23 +239,21 @@ def circuit_set(name: str = None, num: int = None):
                     cp_idx = 0
                     for q2 in range(num_wires):
                         if q2 != q:
-                            qp.Hadamard(wires=wires[q])
-                            qp.ControlledPhaseShift(params[i, q, 2 + cp_idx], wires=[wires[q], wires[q2]])
-                            qp.Hadamard(wires=wires[q])
+                            qp.CRX(params[i, q, 2 + cp_idx], wires=[wires[q2], wires[q]])
                             cp_idx += 1
                 rx_rz_layer(params[i, :, 2 + n_cp:], wires)
 
         return circ6
 
     # ------------------------------------------------------------------
-    # Circuit 7: RX-RZ, staggered parametrized CZ (even pairs then odd pairs), RX-RZ
-    # params shape: (reps, num_wires, 2) + stagger CP angles
+    # Circuit 7: RX-RZ, staggered CRZ (even pairs then odd pairs), RX-RZ
+    # params shape: (reps, num_wires, 2) + stagger CRZ angles
     # Packed: (reps, 4*num_wires + num_wires//2 + (num_wires-1)//2)
     # Simplified: params shape (reps, num_wires, 5)
     #   params[:, :, 0:2]              = first RX-RZ
-    #   params[:, :num_wires//2, 5]    = even-pair CP angles
+    #   params[:, :num_wires//2, 5]    = even-pair CRZ angles
     #   params[:, :, 2:4]              = second RX-RZ
-    #   params[:, :(num_wires-1)//2, 5]= odd-pair CP angles   (in separate tensor below)
+    #   params[:, :(num_wires-1)//2, 5]= odd-pair CRZ angles   (in separate tensor below)
     # For simplicity we split into separate param tensors matching the Qiskit structure.
     # ------------------------------------------------------------------
     elif num == 7:
@@ -258,15 +267,15 @@ def circuit_set(name: str = None, num: int = None):
             for i in range(reps):
                 rx_rz_layer(params[i,:,:2], wires)
                 for q_idx, q in enumerate(range(0, num_wires - 1, 2)):
-                    qp.ControlledPhaseShift(params[i, q_idx, 4], wires=[wires[q], wires[q + 1]])
+                    qp.CRZ(params[i, q_idx, 4], wires=[wires[q + 1], wires[q]])
                 rx_rz_layer(params[i,:,2:4], wires)
                 for q_idx, q in enumerate(range(1, num_wires - 1, 2)):
-                    qp.ControlledPhaseShift(params[i, q_idx, 5], wires=[wires[q], wires[q + 1]])
+                    qp.CRZ(params[i, q_idx, 5], wires=[wires[q + 1], wires[q]])
 
         return circ7
 
     # ------------------------------------------------------------------
-    # Circuit 8: same as 7 but with parametrized CX (H-CP-H)
+    # Circuit 8: same as 7 but with CRX
     # ------------------------------------------------------------------
     elif num == 8:
         def circ8(params, wires=None):
@@ -279,14 +288,10 @@ def circuit_set(name: str = None, num: int = None):
             for i in range(reps):
                 rx_rz_layer(params[i,:,:2], wires)
                 for q_idx, q in enumerate(range(0, num_wires - 1, 2)):
-                    qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q_idx, 4], wires=[wires[q], wires[q + 1]])
-                    qp.Hadamard(wires=wires[q])
+                    qp.CRX(params[i, q_idx, 4], wires=[wires[q + 1], wires[q]])
                 rx_rz_layer(params[i,:,2:4], wires)
                 for q_idx, q in enumerate(range(1, num_wires - 1, 2)):
-                    qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q_idx, 5], wires=[wires[q], wires[q + 1]])
-                    qp.Hadamard(wires=wires[q])
+                    qp.CRX(params[i, q_idx, 5], wires=[wires[q + 1], wires[q]])
 
         return circ8
 
@@ -383,10 +388,10 @@ def circuit_set(name: str = None, num: int = None):
         return circ12
 
     # ------------------------------------------------------------------
-    # Circuit 13: RY, circular CP forward, RY, circular CP backward
+    # Circuit 13: RY, circular CRZ forward, RY, circular CRZ backward
     # params shape: (reps, num_wires, 4)
-    #   [:, :, 0] = first RY, [:, :, 1] = CP forward
-    #   [:, :, 2] = second RY, [:, :, 3] = CP backward
+    #   [:, :, 0] = first RY, [:, :, 1] = CRZ forward
+    #   [:, :, 2] = second RY, [:, :, 3] = CRZ backward
     # ------------------------------------------------------------------
     elif num == 13:
         def circ13(params, wires=None):
@@ -397,16 +402,16 @@ def circuit_set(name: str = None, num: int = None):
                 for q in range(num_wires):
                     qp.RY(params[i, q, 0], wires=wires[q])
                 for q in range(num_wires):
-                    qp.ControlledPhaseShift(params[i, q, 1], wires=[wires[q], wires[(q + 1) % num_wires]])
+                    qp.CRZ(params[i, q, 1], wires=[wires[(q + 1) % num_wires], wires[q]])
                 for q in range(num_wires):
                     qp.RY(params[i, q, 2], wires=wires[q])
                 for q in range(num_wires):
-                    qp.ControlledPhaseShift(params[i, q, 3], wires=[wires[q], wires[(q - 1) % num_wires]])
+                    qp.CRZ(params[i, q, 3], wires=[wires[(q - 1) % num_wires], wires[q]])
 
         return circ13
 
     # ------------------------------------------------------------------
-    # Circuit 14: same as 13 but with parametrized CX (H-CP-H) circular
+    # Circuit 14: same as 13 but with CRX, circular
     # params shape: (reps, num_wires, 4)
     # ------------------------------------------------------------------
     elif num == 14:
@@ -418,15 +423,11 @@ def circuit_set(name: str = None, num: int = None):
                 for q in range(num_wires):
                     qp.RY(params[i, q, 0], wires=wires[q])
                 for q in range(num_wires):
-                    qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q, 1], wires=[wires[q], wires[(q + 1) % num_wires]])
-                    qp.Hadamard(wires=wires[q])
+                    qp.CRX(params[i, q, 1], wires=[wires[(q + 1) % num_wires], wires[q]])
                 for q in range(num_wires):
                     qp.RY(params[i, q, 2], wires=wires[q])
                 for q in range(num_wires):
-                    qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q, 3], wires=[wires[(q - 1) % num_wires], wires[q]])
-                    qp.Hadamard(wires=wires[q])
+                    qp.CRX(params[i, q, 3], wires=[wires[(q - 1) % num_wires], wires[q]])
 
         return circ14
 
@@ -452,10 +453,10 @@ def circuit_set(name: str = None, num: int = None):
         return circ15
 
     # ------------------------------------------------------------------
-    # Circuit 16: RX-RZ + staggered parametrized CZ sharing the same angle set
+    # Circuit 16: RX-RZ + staggered CRZ sharing the same angle set
     # (even then odd pairs reuse the same param array — matches Qiskit bug/feature)
     # params shape: (reps, num_wires, 3)
-    #   [:, :, :2] = RX-RZ, [:, :num_wires-1, 2] = CP angles (shared even/odd)
+    #   [:, :, :2] = RX-RZ, [:, :num_wires-1, 2] = CRZ angles (shared even/odd)
     # ------------------------------------------------------------------
     elif num == 16:
         def circ16(params, wires=None):
@@ -465,14 +466,14 @@ def circuit_set(name: str = None, num: int = None):
             for i in range(reps):
                 rx_rz_layer(params[i, :, :2], wires)
                 for q in range(0, num_wires - 1, 2):
-                    qp.ControlledPhaseShift(params[i, q, 2], wires=[wires[q], wires[q + 1]])
+                    qp.CRZ(params[i, q, 2], wires=[wires[q + 1], wires[q]])
                 for q in range(1, num_wires - 1, 2):
-                    qp.ControlledPhaseShift(params[i, q, 2], wires=[wires[q], wires[q + 1]])
+                    qp.CRZ(params[i, q, 2], wires=[wires[q + 1], wires[q]])
 
         return circ16
 
     # ------------------------------------------------------------------
-    # Circuit 17: same as 16 but with parametrized CX (H-CP-H)
+    # Circuit 17: same as 16 but with CRX
     # ------------------------------------------------------------------
     elif num == 17:
         def circ17(params, wires=None):
@@ -482,20 +483,16 @@ def circuit_set(name: str = None, num: int = None):
             for i in range(reps):
                 rx_rz_layer(params[i, :, :2], wires)
                 for q in range(0, num_wires - 1, 2):
-                    qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q, 2], wires=[wires[q], wires[q + 1]])
-                    qp.Hadamard(wires=wires[q])
+                    qp.CRX(params[i, q, 2], wires=[wires[q + 1], wires[q]])
                 for q in range(1, num_wires - 1, 2):
-                    qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q, 2], wires=[wires[q], wires[q + 1]])
-                    qp.Hadamard(wires=wires[q])
+                    qp.CRX(params[i, q, 2], wires=[wires[q + 1], wires[q]])
 
         return circ17
 
     # ------------------------------------------------------------------
-    # Circuit 18: RX-RZ + circular parametrized CZ (wraps around)
+    # Circuit 18: RX-RZ + circular CRZ (wraps around)
     # params shape: (reps, num_wires, 3)
-    #   [:, :, :2] = RX-RZ, [:, :, 2] = CP angles (including wrap-around edge)
+    #   [:, :, :2] = RX-RZ, [:, :, 2] = CRZ angles (including wrap-around edge)
     # ------------------------------------------------------------------
     elif num == 18:
         def circ18(params, wires=None):
@@ -505,12 +502,12 @@ def circuit_set(name: str = None, num: int = None):
             for i in range(reps):
                 rx_rz_layer(params[i, :, :2], wires)
                 for q in range(num_wires):
-                    qp.ControlledPhaseShift(params[i, q, 2], wires=[wires[q], wires[(q + 1) % num_wires]])
+                    qp.CRZ(params[i, q, 2], wires=[wires[(q + 1) % num_wires], wires[q]])
 
         return circ18
 
     # ------------------------------------------------------------------
-    # Circuit 19: RX-RZ + circular parametrized CX (H-CP-H, wraps around)
+    # Circuit 19: RX-RZ + circular CRX (wraps around)
     # params shape: (reps, num_wires, 3)  — same layout as circuit 18
     # ------------------------------------------------------------------
     elif num == 19:
@@ -521,9 +518,7 @@ def circuit_set(name: str = None, num: int = None):
             for i in range(reps):
                 rx_rz_layer(params[i, :, :2], wires)
                 for q in range(num_wires):
-                    qp.Hadamard(wires=wires[q])
-                    qp.ControlledPhaseShift(params[i, q, 2], wires=[wires[q], wires[(q + 1) % num_wires]])
-                    qp.Hadamard(wires=wires[q])
+                    qp.CRX(params[i, q, 2], wires=[wires[(q + 1) % num_wires], wires[q]])
 
         return circ19
 
@@ -630,10 +625,15 @@ def circuit_set(name: str = None, num: int = None):
         raise ValueError(f"Circuit number {num} is not defined.")
     
 
-def weight_tensor_shape(num, num_wires, reps = 1):
+def weight_tensor_shape(num, num_wires, reps = 1, generic: bool = False):
     """
-    Return the needed shape of the weight tensor for a given circuit number
+    Return the needed shape of the weight tensor for a given circuit number.
+    generic=True: `num` is a generic_ansatz code -- see circuit_set.
     """
+    if generic:
+        import generic_ansatz
+        return generic_ansatz.weight_tensor_shape(num, num_wires, reps)
+
     if num == 1:
         return (reps, num_wires, 2)
     elif num == 2:
@@ -682,7 +682,7 @@ def weight_tensor_shape(num, num_wires, reps = 1):
         raise ValueError(f"Circuit number {num} is not defined.")
 
 
-def n_trainable(num, num_wires, reps=1):
+def n_trainable(num, num_wires, reps=1, generic: bool = False):
     """Number of weight-tensor entries that circuit_set(num) actually reads.
 
     weight_tensor_shape allocates a rectangular tensor, but several circuits
@@ -693,8 +693,10 @@ def n_trainable(num, num_wires, reps=1):
     count the nonzero gradients. A structurally-unused entry gets an exact
     zero gradient; a coincidental zero from a used entry has probability zero
     under random projection weights and random input angles.
+
+    generic=True: `num` is a generic_ansatz code -- see circuit_set.
     """
-    shape = weight_tensor_shape(num, num_wires, reps)
+    shape = weight_tensor_shape(num, num_wires, reps, generic=generic)
     generator = torch.Generator().manual_seed(0)
     weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64, generator=generator)
     weights.requires_grad_(True)
@@ -702,7 +704,7 @@ def n_trainable(num, num_wires, reps=1):
 
     @qp.qnode(dev, interface="torch", diff_method="backprop")
     def probe(weights):
-        circuit_set(num=num)(weights, wires=list(range(num_wires)))
+        circuit_set(num=num, generic=generic)(weights, wires=list(range(num_wires)))
         # qp.state() (not qp.probs()) so phase-only gates (e.g. a trailing RZ)
         # are visible too — probabilities in the computational basis are blind
         # to them, which would falsely mark their parameters as unused.

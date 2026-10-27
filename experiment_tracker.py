@@ -18,6 +18,7 @@ EXPERIMENTS_FIELDS = [
     "id",
     "timestamp",
     "circuit_num",
+    "generic",
     "n_qubits",
     "layers",
     "anzats_reps",
@@ -108,6 +109,7 @@ def train_and_record(
     experiments_csv: str = EXPERIMENTS_CSV,
     train_fn = train,
     path: str = "results/",
+    generic: bool = False,
 ):
     """
     Run `train`, then persist metadata to experiments.csv and the cost curve
@@ -118,7 +120,8 @@ def train_and_record(
     model, weights, x, target_y :
         Passed straight through to `train`.
     circuit_num : int
-        The circuit index (1-19) used in this experiment.
+        The circuit index (1-19) used in this experiment, or a
+        generic_ansatz code when generic=True.
     n_qubits : int
         Number of qubits.
     reps : int
@@ -129,6 +132,8 @@ def train_and_record(
         Any free-text annotation to attach to this run.
     experiments_csv : str
         Path to the experiments summary CSV.
+    generic : bool
+        circuit_num is a generic_ansatz code -- see circuits.circuit_set.
 
     Returns
     -------
@@ -145,7 +150,8 @@ def train_and_record(
     timestamp     = datetime.now().isoformat(timespec="seconds")
 
     # ---- run training ------------------------------------------------
-    model,weights = build_model(circuit_num, n_qubits, layers, anzats_reps, measuring_qubit=n_qubits-1)
+    model, weights = build_model(circuit_num, n_qubits, layers, anzats_reps,
+                                  measuring_qubit=n_qubits - 1, generic=generic)
 
     final_weights, cst = train_fn(
         model, weights, x, target_y,
@@ -160,13 +166,14 @@ def train_and_record(
         "id":               experiment_id,
         "timestamp":        timestamp,
         "circuit_num":      circuit_num,
+        "generic":          generic,
         "n_qubits":         n_qubits,
         "layers":            layers,
         "anzats_reps":             anzats_reps,
         # weight_tensor_shape allocates a rectangular tensor, but several
         # circuits don't read all of it — count what's
         # actually trainable rather than the raw tensor size.
-        "n_params":         layers * n_trainable(circuit_num, n_qubits, anzats_reps),
+        "n_params":         layers * n_trainable(circuit_num, n_qubits, anzats_reps, generic=generic),
         "n_train_samples":  len(x),
         "max_steps":        max_steps,
         "batch_size":       batch_size,

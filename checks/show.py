@@ -1,14 +1,18 @@
 """Show the actual gate structure of a circuit -- so "what am I testing"
 has a direct answer instead of requiring a read through the code.
 
-Two targets:
+Three targets:
   - Any circuit_set architecture from circuits.py
+  - Any generic_ansatz code (see that module's docstring for the 5-digit
+    encoding) -- pass --generic so `target` is decoded as a code instead
+    of looked up as a circuit_set number
   - One concrete random realization of the range-connectivity ensemble
     (two_designs/range_connectivity.py), which otherwise has no single
     fixed circuit to look at -- its wiring is redrawn per sample by
     design (see that module's docstring).
 
     python check.py show 34 --n-qubits 6 --reps 2
+    python check.py show 21121 --generic --n-qubits 6 --reps 2
     python check.py show connectivity --n-qubits 6 --reps 3 --max-range 2 --seed 0
 
 By default this prints a text diagram sized to your actual terminal width
@@ -78,11 +82,12 @@ def _show(tape, title: str, mpl_path):
         print(f"\n(mpl diagram saved to {mpl_path})")
 
 
-def show_circuit_set(num: int, n_qubits: int, reps: int, mpl_path):
-    shape = weight_tensor_shape(num, n_qubits, reps)
+def show_circuit_set(num: int, n_qubits: int, reps: int, mpl_path, generic: bool = False):
+    shape = weight_tensor_shape(num, n_qubits, reps, generic=generic)
     weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64)
-    tape = _build_tape(lambda: circuit_set(num=num)(weights, wires=list(range(n_qubits))))
-    title = f"circuit_set({num}), n_qubits={n_qubits}, reps={reps}, weight shape={tuple(shape)}\n"
+    tape = _build_tape(lambda: circuit_set(num=num, generic=generic)(weights, wires=list(range(n_qubits))))
+    label = "generic_ansatz" if generic else "circuit_set"
+    title = f"{label}({num}), n_qubits={n_qubits}, reps={reps}, weight shape={tuple(shape)}\n"
     _show(tape, title, mpl_path)
 
 
@@ -105,12 +110,16 @@ def show_connectivity(n_qubits: int, reps: int, max_range: int, seed, mpl_path):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("target", help="a circuit_set number (e.g. 34), or 'connectivity' for "
-                                   "one range_connectivity realization")
+    p.add_argument("target", help="a circuit_set number (e.g. 34), a generic_ansatz code "
+                                   "(with --generic), or 'connectivity' for one "
+                                   "range_connectivity realization")
+    p.add_argument("--generic", action="store_true",
+                    help="interpret `target` as a generic_ansatz code instead of a "
+                         "circuit_set number -- see generic_ansatz.py for the encoding")
     p.add_argument("--n-qubits", type=int, default=4)
     p.add_argument("--reps", type=int, default=2)
     p.add_argument("--max-range", type=int, default=1,
-                    help="connectivity ensemble only; ignored for circuit_set numbers")
+                    help="connectivity ensemble only; ignored for circuit_set/generic numbers")
     p.add_argument("--seed", type=int, default=None,
                     help="connectivity ensemble only, for a reproducible wiring+angle draw")
     p.add_argument("--mpl", nargs="?", const=True, default=None, metavar="PATH",
@@ -128,7 +137,7 @@ def main(argv=None):
         num = int(args.target)
     except ValueError:
         raise SystemExit(f"'{args.target}' is neither a circuit_set number nor 'connectivity'.")
-    show_circuit_set(num, args.n_qubits, args.reps, mpl_path)
+    show_circuit_set(num, args.n_qubits, args.reps, mpl_path, generic=args.generic)
 
 
 if __name__ == "__main__":

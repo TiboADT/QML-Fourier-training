@@ -83,15 +83,16 @@ def recommended_batch_size(n_qubits: int, device: torch.device,
 
 # ── tracing circuit_set(num) into a flat, fused gate list ─────────────────
 
-def _trace_operations(num, n_qubits, weights):
+def _trace_operations(num, n_qubits, weights, generic: bool = False):
     """Capture circuit_set(num)'s operation sequence via PennyLane's queuing
     mechanism. `weights` carries a trailing batch dimension (shape from
     weight_tensor_shape(...) + (batch_size,)) — circuits.py's circuits index
     into it as params[i, q, ...], so every sliced-out gate parameter comes
     out already batch-shaped, with no per-circuit code needed to support it.
+    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
     """
     with qp.queuing.AnnotatedQueue() as q:
-        circuit_set(num=num)(weights, wires=list(range(n_qubits)))
+        circuit_set(num=num, generic=generic)(weights, wires=list(range(n_qubits)))
     return qp.tape.QuantumScript.from_queue(q).operations
 
 
@@ -152,20 +153,22 @@ def apply_embedded_gate(U: torch.Tensor, G: torch.Tensor, wires: tuple, n_qubits
 
 
 def sample_unitaries(num: int, n_qubits: int, reps: int, batch_size: int, *,
+                      generic: bool = False,
                       device: Optional[torch.device] = None,
                       dtype: torch.dtype = torch.complex64,
                       generator: Optional[torch.Generator] = None) -> torch.Tensor:
     """batch_size independent samples of circuit_set(num)'s unitary at
     (n_qubits, reps), each with parameters drawn uniformly on [0, 2*pi).
     Returns a (batch_size, d, d) tensor on `device`.
+    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
     """
     if device is None:
         device = get_device()
-    shape = weight_tensor_shape(num, n_qubits, reps)
+    shape = weight_tensor_shape(num, n_qubits, reps, generic=generic)
     weights = 2 * torch.pi * torch.rand(shape + (batch_size,), dtype=torch.float64, generator=generator)
     weights = weights.to(device)
 
-    operations = _trace_operations(num, n_qubits, weights)
+    operations = _trace_operations(num, n_qubits, weights, generic=generic)
     fused = _fused_gate_list(operations, dtype, device)
 
     d = 2 ** n_qubits
@@ -381,30 +384,34 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
     return est
 
 
-def _circuit_sampler(num: int, n_qubits: int, reps: int) -> Sampler:
+def _circuit_sampler(num: int, n_qubits: int, reps: int, generic: bool = False) -> Sampler:
     """The sampler backing every circuit_set architecture: partially applies
     sample_unitaries so it matches the generic (batch_size, *, device, dtype,
-    generator) -> Tensor interface."""
+    generator) -> Tensor interface. generic=True: `num` is a generic_ansatz
+    code -- see circuits.circuit_set."""
     def sampler(batch_size, *, device=None, dtype=torch.complex64, generator=None):
-        return sample_unitaries(num, n_qubits, reps, batch_size,
+        return sample_unitaries(num, n_qubits, reps, batch_size, generic=generic,
                                  device=device, dtype=dtype, generator=generator)
     return sampler
 
 
 def estimate_once(num: int, n_qubits: int, reps: int, t: int, n_samples: int, *,
+                   generic: bool = False,
                    device: Optional[torch.device] = None,
                    dtype: torch.dtype = torch.complex64,
                    generator: Optional[torch.Generator] = None) -> Estimate:
     """
     estimate_once_from_sampler Wrapper for circuit_set(num) architectures.
+    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
     """
     return estimate_once_from_sampler(
-        _circuit_sampler(num, n_qubits, reps), 2 ** n_qubits, t, n_samples,
+        _circuit_sampler(num, n_qubits, reps, generic=generic), 2 ** n_qubits, t, n_samples,
         device=device, dtype=dtype, generator=generator,
     )
 
 
 def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
+                              generic: bool = False,
                               n_samples: Optional[int] = None,
                               rel_tol: float = 0.4,
                               max_batches: int = 50,
@@ -415,9 +422,10 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
                               verbose: bool = False) -> Estimate:
     """
         estimate_until_converged Wrapper for circuit_set(num) architectures.
+        generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
         """
     return estimate_until_converged_from_sampler(
-        _circuit_sampler(num, n_qubits, reps), 2 ** n_qubits, t,
+        _circuit_sampler(num, n_qubits, reps, generic=generic), 2 ** n_qubits, t,
         n_samples=n_samples, rel_tol=rel_tol, max_batches=max_batches,
         min_abs_error=min_abs_error, device=device, dtype=dtype,
         generator=generator, verbose=verbose,
@@ -425,8 +433,10 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
 
 
 
-def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None, reps: int = None) -> str:
-    header = f"circuit {circuit_num}, n_qubits={n_qubits}, reps={reps}" if circuit_num is not None else ""
+def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None, reps: int = None,
+           generic: bool = False) -> str:
+    label = "generic_ansatz" if generic else "circuit"
+    header = f"{label} {circuit_num}, n_qubits={n_qubits}, reps={reps}" if circuit_num is not None else ""
     return (
         f"{header}\n"
         f"  F^({est.t}) (ansatz) : {est.frame_potential:.6f}\n"
@@ -444,7 +454,7 @@ def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None, reps
 FRAME_POTENTIAL_CSV = "results/frame_potential.csv"
 FRAME_POTENTIAL_FIELDS = [
     "id", "timestamp", "git_commit",
-    "circuit_num", "n_qubits", "reps", "t",
+    "circuit_num", "generic", "n_qubits", "reps", "t",
     "frame_potential", "haar_value", "delta", "ratio",
     "variance", "fidelity_error", "variance_inflation",
     "n_pairs", "device", "dtype", "seed", "notes",
@@ -466,18 +476,21 @@ def _git_commit_hash() -> str:
 
 def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
                    device, dtype, seed: Optional[int] = None, notes: str = "",
-                   path: str = FRAME_POTENTIAL_CSV) -> str:
+                   path: str = FRAME_POTENTIAL_CSV, generic: bool = False) -> str:
     """Append one row to `path` (creating it with a header if needed).
     Deriving frame_potential/delta/ratio/fidelity_error from Estimate's
     properties rather than storing them independently makes the "file
     doesn't match what the code would compute" bug from code review §1.5
-    structurally impossible here."""
+    structurally impossible here. generic: whether circuit_num is a
+    generic_ansatz code rather than a circuit_set number -- recorded so a
+    saved 5-digit circuit_num can't be mistaken for a legacy one."""
     row_id = str(uuid.uuid4())
     row = {
         "id": row_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "git_commit": _git_commit_hash(),
         "circuit_num": circuit_num,
+        "generic": generic,
         "n_qubits": n_qubits,
         "reps": reps,
         "t": est.t,

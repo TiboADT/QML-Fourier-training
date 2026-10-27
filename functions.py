@@ -64,12 +64,13 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
     return weights.detach(), cst
 
 
-def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit = 0):
-    """Build a model for the given circuit number, number of qubits, and repetitions."""
-    
-    circuit_to_call = circuit_set(num=circuit_num)
+def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit = 0, generic: bool = False):
+    """Build a model for the given circuit number, number of qubits, and repetitions.
+    generic=True: `circuit_num` is a generic_ansatz code"""
 
-    weights_shape = weight_tensor_shape(circuit_num, n_qubits, anzats_reps)
+    circuit_to_call = circuit_set(num=circuit_num, generic=generic)
+
+    weights_shape = weight_tensor_shape(circuit_num, n_qubits, anzats_reps, generic=generic)
     weights_shape = (layers,) + weights_shape
     weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True)
 
@@ -82,8 +83,7 @@ def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit 
 
     @qp.qnode(dev, interface="torch")
     def circuit(weights,x):
-        (layers,trainable_block_layers,qubits) = weights.shape[:3]
-        layers = layers - 1
+        layers = weights.shape[0] - 1
         wires = list(range(n_qubits))
         circuit_to_call(weights[0], wires = wires)
         for l in range(layers):

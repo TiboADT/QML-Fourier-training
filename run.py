@@ -21,6 +21,13 @@ Compare architectures at a matched parameter budget instead of matched reps
 (each circuit sweeps its own reps=1,2,3,... until circuits.n_trainable
 would exceed the budget):
     python run.py frame-potential --circuits 1 18 34 --n-qubits 6 --max-params 100 --t 2
+
+Sweep every non-redundant generic_ansatz architecture (see
+generic_ansatz.list_architectures()) instead of the hardcoded circuit_set
+numbers -- pass --generic, and --circuits all to use every one of them
+(the default when --generic is given with no --circuits):
+    python run.py frame-potential --generic --n-qubits 6 --reps 1 2 3 --t 2
+    python run.py train --generic --circuits all --n-qubits 6 --layers 3 --reps 1 --max-steps 600
 """
 
 import argparse
@@ -30,11 +37,23 @@ from itertools import product
 import torch
 
 import frame_potential as fp
+import generic_ansatz
 from circuits import n_trainable
 
 
-def parse_circuits(values):
-    """Accept individual numbers and/or ranges like '1-19' in the same list."""
+def parse_circuits(values, generic: bool = False):
+    """Accept individual numbers and/or ranges like '1-19' in the same list
+    (legacy circuit_set numbers).
+
+    generic=True: values are generic_ansatz codes instead -- ranges aren't
+    meaningful for those (codes aren't sequential), so each value is a
+    single code, except the literal 'all', which expands to
+    generic_ansatz.list_architectures() (every distinct, non-redundant
+    architecture)."""
+    if generic:
+        if list(values) == ["all"]:
+            return generic_ansatz.list_architectures()
+        return [int(v) for v in values]
     circuits = []
     for v in values:
         if "-" in v:
@@ -48,9 +67,16 @@ def parse_circuits(values):
 # ── train ───────────────────────────────────────────────────────────────
 
 def add_train_parser(sub):
-    p = sub.add_parser("train", help="train circuit_set architectures on Fourier-series targets")
-    p.add_argument("--circuits", type=str, nargs="+", default=["1-19"],
-                    help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated)")
+    p = sub.add_parser("train", help="train circuit_set (or generic_ansatz) architectures on Fourier-series targets")
+    p.add_argument("--circuits", type=str, nargs="+", default=None,
+                    help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated). "
+                         "With --generic, each value is a generic_ansatz code instead "
+                         "(ranges aren't meaningful there), or 'all' for every "
+                         "non-redundant architecture from generic_ansatz.list_architectures(). "
+                         "Default: '1-19' normally, 'all' with --generic.")
+    p.add_argument("--generic", action="store_true",
+                    help="interpret --circuits as generic_ansatz codes instead of "
+                         "circuit_set numbers -- see generic_ansatz.py's module docstring")
     p.add_argument("--n-qubits", type=int, nargs="+", default=[6])
     p.add_argument("--layers", type=int, nargs="+", default=[3],
                     help="number of data-reuploading layers -- stays fixed per sweep "
@@ -98,7 +124,8 @@ def cmd_train(args):
         raise SystemExit("--reps and --max-params are mutually exclusive -- give "
                           "a fixed rep list or a parameter budget, not both.")
 
-    circuits = parse_circuits(args.circuits)
+    circuits_arg = args.circuits if args.circuits is not None else (["all"] if args.generic else ["1-19"])
+    circuits = parse_circuits(circuits_arg, generic=args.generic)
 
     if args.max_params is not None:
         # layers stays fixed per sweep point (the outer loop below); only
@@ -109,10 +136,12 @@ def cmd_train(args):
         for n_qubits in args.n_qubits:
             for layers in args.layers:
                 for num in circuits:
-                    reps_list = reps_for_param_budget(num, n_qubits, args.max_params, multiplier=layers)
+                    reps_list = reps_for_param_budget(num, n_qubits, args.max_params,
+                                                        multiplier=layers, generic=args.generic)
                     if not reps_list:
                         print(f"  circuit {num} (n_qubits={n_qubits}, layers={layers}): skipped -- "
-                              f"even reps=1 already has {layers * n_trainable(num, n_qubits, 1)} "
+                              f"even reps=1 already has "
+                              f"{layers * n_trainable(num, n_qubits, 1, generic=args.generic)} "
                               f"trainable parameters, over --max-params {args.max_params}")
                         continue
                     combos.extend((n_qubits, layers, reps, num) for reps in reps_list)
@@ -143,7 +172,7 @@ def cmd_train(args):
                 exp_id, weights, cst = train_and_record(
                     x, y, circuit_num=num, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
                     max_steps=args.max_steps, batch_size=args.batch_size,
-                    notes=args.notes, path=args.out,
+                    notes=args.notes, path=args.out, generic=args.generic,
                 )
                 if not args.quiet:
                     print(f"[{run_i}/{n_runs}] ({time.time() - run_t0:.1f}s) degree={degree} fn={fn_i} "
@@ -156,9 +185,16 @@ def cmd_train(args):
 # ── frame-potential ─────────────────────────────────────────────────────
 
 def add_frame_potential_parser(sub):
-    p = sub.add_parser("frame-potential", help="estimate F^(t) for circuit_set architectures")
-    p.add_argument("--circuits", type=str, nargs="+", default=["1-19"],
-                    help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated)")
+    p = sub.add_parser("frame-potential", help="estimate F^(t) for circuit_set (or generic_ansatz) architectures")
+    p.add_argument("--circuits", type=str, nargs="+", default=None,
+                    help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated). "
+                         "With --generic, each value is a generic_ansatz code instead "
+                         "(ranges aren't meaningful there), or 'all' for every "
+                         "non-redundant architecture from generic_ansatz.list_architectures(). "
+                         "Default: '1-19' normally, 'all' with --generic.")
+    p.add_argument("--generic", action="store_true",
+                    help="interpret --circuits as generic_ansatz codes instead of "
+                         "circuit_set numbers -- see generic_ansatz.py's module docstring")
     p.add_argument("--n-qubits", type=int, default=6)
     p.add_argument("--reps", type=int, nargs="+", default=None,
                     help="ansatz repetitions to sweep (default: 1 2 3). Mutually "
@@ -188,7 +224,7 @@ def add_frame_potential_parser(sub):
     return p
 
 
-def reps_for_param_budget(num, n_qubits, max_params, multiplier=1):
+def reps_for_param_budget(num, n_qubits, max_params, multiplier=1, generic: bool = False):
     """All reps = 1, 2, 3, ... whose multiplier * circuits.n_trainable(num,
     n_qubits, reps) stays at or under max_params -- not the raw allocated
     weight-tensor size (several circuits don't read all of it, see
@@ -204,11 +240,13 @@ def reps_for_param_budget(num, n_qubits, max_params, multiplier=1):
     of the same reps-parametrized block, each with its own weights -- see
     experiment_tracker.py's n_params = layers * n_trainable(...) -- so the
     *total* trainable-parameter count a training run actually has is that
-    product, not n_trainable alone)."""
+    product, not n_trainable alone).
+
+    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set."""
     reps_list = []
     reps = 1
     while True:
-        if multiplier * n_trainable(num, n_qubits, reps) > max_params:
+        if multiplier * n_trainable(num, n_qubits, reps, generic=generic) > max_params:
             break
         reps_list.append(reps)
         reps += 1
@@ -232,7 +270,8 @@ def cmd_frame_potential(args):
         raise SystemExit("--reps and --max-params are mutually exclusive -- give "
                           "a fixed rep count or a parameter budget, not both.")
 
-    circuits = parse_circuits(args.circuits)
+    circuits_arg = args.circuits if args.circuits is not None else (["all"] if args.generic else ["1-19"])
+    circuits = parse_circuits(circuits_arg, generic=args.generic)
     device = torch.device(args.device) if args.device else fp.get_device()
     dtype = torch.complex64 if args.dtype == "complex64" else torch.complex128
     generator = torch.Generator().manual_seed(args.seed) if args.seed is not None else None
@@ -240,10 +279,10 @@ def cmd_frame_potential(args):
     if args.max_params is not None:
         combos = []
         for num in circuits:
-            reps_list = reps_for_param_budget(num, args.n_qubits, args.max_params)
+            reps_list = reps_for_param_budget(num, args.n_qubits, args.max_params, generic=args.generic)
             if not reps_list:
                 print(f"  circuit {num}: skipped -- even reps=1 already has "
-                      f"{n_trainable(num, args.n_qubits, 1)} trainable parameters, "
+                      f"{n_trainable(num, args.n_qubits, 1, generic=args.generic)} trainable parameters, "
                       f"over --max-params {args.max_params}")
                 continue
             combos.extend(product([num], reps_list, args.t))
@@ -278,7 +317,7 @@ def cmd_frame_potential(args):
         run_t0 = time.time()
         if args.converge:
             est = fp.estimate_until_converged(
-                num, args.n_qubits, reps, t,
+                num, args.n_qubits, reps, t, generic=args.generic,
                 n_samples=args.n_samples, rel_tol=args.rel_tol, max_batches=args.max_batches,
                 device=device, dtype=dtype, generator=generator, verbose=not args.quiet,
             )
@@ -287,14 +326,14 @@ def cmd_frame_potential(args):
         else:
             n_samples = args.n_samples or (2 ** args.n_qubits * t)
             est = fp.estimate_once(
-                num, args.n_qubits, reps, t, n_samples,
+                num, args.n_qubits, reps, t, n_samples, generic=args.generic,
                 device=device, dtype=dtype, generator=generator,
             )
-        fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps,
+        fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic,
                           device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
         if not args.quiet:
             print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) \n" +
-                  fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps))
+                  fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic))
 
     print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
 
