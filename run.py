@@ -132,15 +132,22 @@ def cmd_train(args):
         # reps is budget-driven, same as frame-potential's --max-params --
         # see reps_for_param_budget's docstring for why layers is the
         # multiplier rather than another budget-swept dimension.
+        # see cmd_frame_potential's comment on the identical loop there: this
+        # calls n_trainable (a real PennyLane forward+backward pass) once per
+        # reps tried, per circuit -- printing only on a skip left a long,
+        # silent (and, before a fix elsewhere, occasionally infinite) wait
+        # that was indistinguishable from a hang.
         combos = []
         for n_qubits in args.n_qubits:
             for layers in args.layers:
-                for num in circuits:
+                for i, num in enumerate(circuits, start=1):
+                    t_budget0 = time.time()
                     reps_list = reps_for_param_budget(num, n_qubits, args.max_params,
                                                         multiplier=layers, generic=args.generic)
+                    print(f"  [{i}/{len(circuits)}] circuit {num} (n_qubits={n_qubits}, layers={layers}): "
+                          f"reps={reps_list} ({time.time() - t_budget0:.1f}s)")
                     if not reps_list:
-                        print(f"  circuit {num} (n_qubits={n_qubits}, layers={layers}): skipped -- "
-                              f"even reps=1 already has "
+                        print(f"    skipped -- even reps=1 already has "
                               f"{layers * n_trainable(num, n_qubits, 1, generic=args.generic)} "
                               f"trainable parameters, over --max-params {args.max_params}")
                         continue
@@ -242,13 +249,22 @@ def reps_for_param_budget(num, n_qubits, max_params, multiplier=1, generic: bool
     *total* trainable-parameter count a training run actually has is that
     product, not n_trainable alone).
 
-    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set."""
+    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
+    Some generic_ansatz codes (topo_category=0 -- no entangling topology at
+    all, e.g. 20000) deliberately collapse to the same fixed-size single
+    rotation layer for *every* reps (see generic_ansatz's module docstring),
+    so n_trainable never grows and never exceeds max_params -- without the
+    plateau check below this would loop forever instead of stopping once
+    increasing reps stops changing anything."""
     reps_list = []
     reps = 1
+    prev_n = None
     while True:
-        if multiplier * n_trainable(num, n_qubits, reps, generic=generic) > max_params:
+        n = multiplier * n_trainable(num, n_qubits, reps, generic=generic)
+        if n > max_params or n == prev_n:
             break
         reps_list.append(reps)
+        prev_n = n
         reps += 1
     return reps_list
 
@@ -277,11 +293,24 @@ def cmd_frame_potential(args):
     generator = torch.Generator().manual_seed(args.seed) if args.seed is not None else None
 
     if args.max_params is not None:
+        # Building this sweep means calling n_trainable (a real forward+backward
+        # pass through a PennyLane QNode) once per reps value tried, per
+        # circuit -- for a large --circuits list (e.g. --generic with no
+        # --circuits, which sweeps every architecture) that can take tens of
+        # seconds with nothing else printed yet, which looks identical to a
+        # hang. One line per circuit here, as it's computed, instead of only
+        # ever printing on a skip, is the fix for that -- not just reassurance,
+        # it also makes a genuinely slow or runaway architecture's reps count
+        # (or render time) visible immediately instead of after the whole
+        # list finishes.
         combos = []
-        for num in circuits:
+        for i, num in enumerate(circuits, start=1):
+            t_budget0 = time.time()
             reps_list = reps_for_param_budget(num, args.n_qubits, args.max_params, generic=args.generic)
+            print(f"  [{i}/{len(circuits)}] circuit {num}: reps={reps_list} "
+                  f"({time.time() - t_budget0:.1f}s)")
             if not reps_list:
-                print(f"  circuit {num}: skipped -- even reps=1 already has "
+                print(f"    skipped -- even reps=1 already has "
                       f"{n_trainable(num, args.n_qubits, 1, generic=args.generic)} trainable parameters, "
                       f"over --max-params {args.max_params}")
                 continue

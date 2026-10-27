@@ -17,6 +17,7 @@ defaults to the single best available device rather than looping cpu+cuda
     python check.py benchmark --only stress --device cuda
     python check.py benchmark --only stress --n-qubits 8 10 12 14
     python check.py benchmark --only stress --circuits 1 18 34 --reps 2
+    python check.py benchmark --only stress --generic --circuits 20000 22011 --reps 2
 """
  
 import argparse
@@ -105,7 +106,7 @@ def bench_sample_unitaries(device):
  
 # ── 2b. frame potential: how far does this machine actually reach ─────────
 
-def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2):
+def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2, generic=False):
     """End-to-end cost at scale: sample_unitaries throughput, one fixed-size
     estimate_once batch, and a full estimate_until_converged run, all at
     the SAME n_qubits -- so you can see where the unitary-construction cost
@@ -116,6 +117,9 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2):
     what should fit in memory; a size that still OOMs is itself useful
     information (reported, not treated as an error) about where the actual
     ceiling on this machine is versus what the heuristic predicts.
+
+    generic=True: `circuits` are generic_ansatz codes instead of circuit_set
+    numbers -- see generic_ansatz.py's module docstring.
     """
     header(f"2b. Frame-potential stress test — scaling with n_qubits   [{device}]")
     import frame_potential as fp
@@ -123,7 +127,9 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2):
     if n_qubits_list is None:
         n_qubits_list = [8, 10, 12]
     if circuits is None:
-        circuits = [1, 18]  # cheap (no entangling gates) vs. expensive (all-to-all CZ)
+        circuits = [20000, 22011] if generic else [1, 18]  # cheap (no entangling
+        # gates) vs. expensive (all-to-all) -- 22011 is all-to-all + fixed CZ,
+        # the generic_ansatz analogue of circuit 18's gate-count-heavy wiring
 
     print(f"{'circuit':>7} {'n_qubits':>9} {'d':>7} {'batch_cap':>10} "
           f"{'sample_U':>10} {'estimate_once':>14} {'converged':>11} "
@@ -143,7 +149,8 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2):
             try:
                 sample_batch = max(2, min(32, max_batch))
                 t_sample = timeit(
-                    lambda: fp.sample_unitaries(num, n_qubits, reps, sample_batch, device=device),
+                    lambda: fp.sample_unitaries(num, n_qubits, reps, sample_batch,
+                                                 generic=generic, device=device),
                     repeats=1, warmup=1,
                 )
                 row += f" {t_sample*1000:>9.1f}ms"
@@ -154,7 +161,7 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2):
             try:
                 n_samples_once = max(4, min(4 * d, max_batch))
                 t0 = time.perf_counter()
-                fp.estimate_once(num, n_qubits, reps, t, n_samples_once, device=device)
+                fp.estimate_once(num, n_qubits, reps, t, n_samples_once, generic=generic, device=device)
                 t_once = time.perf_counter() - t0
                 row += f" {t_once:>13.2f}s"
             except RuntimeError as e:
@@ -164,7 +171,7 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2):
 
             try:
                 t0 = time.perf_counter()
-                est = fp.estimate_until_converged(num, n_qubits, reps, t, device=device)
+                est = fp.estimate_until_converged(num, n_qubits, reps, t, generic=generic, device=device)
                 t_conv = time.perf_counter() - t0
                 row += f" {t_conv:>10.2f}s {est.n_pairs:>12,} {est.fidelity_error:>9.4f}"
             except RuntimeError as e:
@@ -284,7 +291,11 @@ def main(argv=None):
     p.add_argument("--n-qubits", type=int, nargs="+", default=None,
                     help="stress only: n_qubits values to sweep (default: 8 10 12)")
     p.add_argument("--circuits", type=int, nargs="+", default=None,
-                    help="stress only: circuit_set numbers to sweep (default: 1 18)")
+                    help="stress only: circuit_set numbers to sweep (default: 1 18), "
+                         "or generic_ansatz codes with --generic (default: 20000 22011)")
+    p.add_argument("--generic", action="store_true",
+                    help="stress only: interpret --circuits as generic_ansatz codes "
+                         "instead of circuit_set numbers")
     p.add_argument("--reps", type=int, default=1, help="stress only")
     p.add_argument("--t", type=int, default=2, help="stress only")
     p.add_argument("--device", choices=["cpu", "cuda"], default=None,
@@ -307,7 +318,7 @@ def main(argv=None):
         import frame_potential as fp
         device = torch.device(args.device) if args.device else fp.get_device()
         bench_stress(device, n_qubits_list=args.n_qubits, circuits=args.circuits,
-                     reps=args.reps, t=args.t)
+                     reps=args.reps, t=args.t, generic=args.generic)
 
     if args.only in (None, "train"):
         bench_square_loss()
