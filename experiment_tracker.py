@@ -1,6 +1,7 @@
 import csv
 import uuid
 import os
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
@@ -95,6 +96,136 @@ def load_costs(path: str = "results/"):
 # Public API
 # ------------------------------------------------------------------
 
+@dataclass
+class TrainingResult:
+    """Everything record_training needs to persist one run, with no file
+    I/O of its own"""
+    circuit_num: int
+    generic: bool
+    n_qubits: int
+    layers: int
+    anzats_reps: int
+    n_params: int
+    n_train_samples: int
+    max_steps: int
+    batch_size: int
+    n_expvals: int
+    final_weights: "torch.Tensor"
+    cst: "torch.Tensor"
+    notes: str = ""
+
+
+def run_training(
+    x,
+    target_y,
+    circuit_num: int,
+    n_qubits: int,
+    layers: int,
+    anzats_reps: int,
+    max_steps: int = 200,
+    batch_size: int = 100,
+    display_step: int = 10,
+    notes: str = "",
+    train_fn = train,
+    generic: bool = False,
+) -> TrainingResult:
+    """Build the model and run `train` -- pure compute, no file I/O. Split
+    out of train_and_record so the expensive part (this) can run in a
+    parallel worker process while a single, non-concurrent caller does all
+    the disk writing afterward (record_training) -- concurrent appends to
+    the same experiments.csv from multiple OS processes aren't safe, so
+    only ever call record_training from one process at a time against a
+    given `path`. See run.py's `--n-workers` for the parallel caller.
+    """
+    model, weights = build_model(circuit_num, n_qubits, layers, anzats_reps,
+                                  measuring_qubit=n_qubits - 1, generic=generic)
+
+    final_weights, cst = train_fn(
+        model, weights, x, target_y,
+        max_steps=max_steps,
+        batch_size=batch_size,
+        display_step=display_step,
+        display=False,
+    )
+
+    return TrainingResult(
+        circuit_num=circuit_num,
+        generic=generic,
+        n_qubits=n_qubits,
+        layers=layers,
+        anzats_reps=anzats_reps,
+        # weight_tensor_shape allocates a rectangular tensor, but several
+        # circuits don't read all of it — count what's
+        # actually trainable rather than the raw tensor size.
+        n_params=layers * n_trainable(circuit_num, n_qubits, anzats_reps, generic=generic),
+        n_train_samples=len(x),
+        max_steps=max_steps,
+        batch_size=batch_size,
+        # How many times the (simulated) quantum circuit's expectation value
+        # was actually estimated over the whole run.
+        n_expvals=getattr(model, "n_expvals", None),
+        final_weights=final_weights,
+        cst=cst,
+        notes=notes,
+    )
+
+
+def record_training(
+    result: TrainingResult,
+    experiments_csv: str = EXPERIMENTS_CSV,
+    path: str = "results/",
+) -> str:
+    """Persist a TrainingResult (from run_training, possibly computed in a
+    different process) to experiments.csv and costs/{id}.npy. See
+    run_training's docstring for why this is a separate call -- only call
+    this from one process at a time against a given `path`.
+
+    Returns
+    -------
+    experiment_id : str
+        UUID of the recorded experiment.
+    """
+    experiments_csv = experiments_csv if path is None else os.path.join(path, experiments_csv)
+
+    _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
+
+    experiment_id = str(uuid.uuid4())
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    cst = result.cst
+
+    exp_row = {
+        "id":               experiment_id,
+        "timestamp":        timestamp,
+        "circuit_num":      result.circuit_num,
+        "generic":          result.generic,
+        "n_qubits":         result.n_qubits,
+        "layers":           result.layers,
+        "anzats_reps":      result.anzats_reps,
+        "n_params":         result.n_params,
+        "n_train_samples":  result.n_train_samples,
+        "max_steps":        result.max_steps,
+        "batch_size":       result.batch_size,
+        "n_expvals":        result.n_expvals,
+        # cst[0]/cst[-1]: the first/last step's own (pre-update) batch loss --
+        # see train()'s docstring for why it's the batch loss, not a separate
+        # full-dataset evaluation.
+        "initial_cost":     round(float(cst[0].item()), 8),
+        "final_cost":       round(float(cst[-1].item()), 8),
+        "notes":            result.notes,
+    }
+    _append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
+
+    # cst holds every one of the max_steps optimizer steps' own batch loss --
+    # no separate pre-training slot to skip any more (see train()'s docstring).
+    save_cost_curve(experiment_id, cst.detach().numpy(), path=path)
+
+    print(f"[tracker] Experiment {experiment_id} saved "
+          f"(circuit={result.circuit_num}, qubits={result.n_qubits}, layers={result.layers}, "
+          f"final_cost={exp_row['final_cost']:.6f})")
+
+    return experiment_id
+
+
 def train_and_record(
     x,
     target_y,
@@ -112,28 +243,10 @@ def train_and_record(
     generic: bool = False,
 ):
     """
-    Run `train`, then persist metadata to experiments.csv and the cost curve
-    to costs/{experiment_id}.npy.
-
-    Parameters
-    ----------
-    model, weights, x, target_y :
-        Passed straight through to `train`.
-    circuit_num : int
-        The circuit index (1-19) used in this experiment, or a
-        generic_ansatz code when generic=True.
-    n_qubits : int
-        Number of qubits.
-    reps : int
-        Number of repetitions of the ansatz.
-    max_steps, batch_size, display_step :
-        Training hyper-parameters forwarded to `train`.
-    notes : str
-        Any free-text annotation to attach to this run.
-    experiments_csv : str
-        Path to the experiments summary CSV.
-    generic : bool
-        circuit_num is a generic_ansatz code -- see circuits.circuit_set.
+    Run `run_training` then `record_training` -- the single-call,
+    single-process convenience most callers want. See their own docstrings
+    for the parallel-friendly split (run.py's `--n-workers` uses it
+    directly instead of this wrapper).
 
     Returns
     -------
@@ -142,62 +255,12 @@ def train_and_record(
     final_weights : torch.Tensor
     cost_history : torch.Tensor  shape (max_steps,)
     """
-    experiments_csv = experiments_csv if path is None else os.path.join(path, experiments_csv)
-
-    _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
-
-    experiment_id = str(uuid.uuid4())
-    timestamp     = datetime.now().isoformat(timespec="seconds")
-
-    # ---- run training ------------------------------------------------
-    model, weights = build_model(circuit_num, n_qubits, layers, anzats_reps,
-                                  measuring_qubit=n_qubits - 1, generic=generic)
-
-    final_weights, cst = train_fn(
-        model, weights, x, target_y,
-        max_steps=max_steps,
-        batch_size=batch_size,
-        display_step=display_step,
-        display=False,
+    result = run_training(
+        x, target_y, circuit_num, n_qubits, layers, anzats_reps,
+        max_steps=max_steps, batch_size=batch_size, display_step=display_step,
+        notes=notes, train_fn=train_fn, generic=generic,
     )
-
-    # ---- write experiment summary row --------------------------------
-    exp_row = {
-        "id":               experiment_id,
-        "timestamp":        timestamp,
-        "circuit_num":      circuit_num,
-        "generic":          generic,
-        "n_qubits":         n_qubits,
-        "layers":            layers,
-        "anzats_reps":             anzats_reps,
-        # weight_tensor_shape allocates a rectangular tensor, but several
-        # circuits don't read all of it — count what's
-        # actually trainable rather than the raw tensor size.
-        "n_params":         layers * n_trainable(circuit_num, n_qubits, anzats_reps, generic=generic),
-        "n_train_samples":  len(x),
-        "max_steps":        max_steps,
-        "batch_size":       batch_size,
-        # How many times the (simulated) quantum circuit's expectation value
-        # was actually estimated over the whole run.
-        "n_expvals":        getattr(model, "n_expvals", None),
-        # cst[0]/cst[-1]: the first/last step's own (pre-update) batch loss --
-        # see train()'s docstring for why it's the batch loss, not a separate
-        # full-dataset evaluation.
-        "initial_cost":     round(float(cst[0].item()), 8),
-        "final_cost":       round(float(cst[-1].item()), 8),
-        "notes":            notes,
-    }
-    _append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
-
-    # ---- save the cost curve -------------------------------------------
-    # cst holds every one of the max_steps optimizer steps' own batch loss --
-    # no separate pre-training slot to skip any more (see train()'s docstring).
-    save_cost_curve(experiment_id, cst.detach().numpy(), path=path)
-
-    print(f"[tracker] Experiment {experiment_id} saved "
-          f"(circuit={circuit_num}, qubits={n_qubits}, layers={layers}, "
-          f"final_cost={exp_row['final_cost']:.6f})")
-
-    return experiment_id, final_weights, cst
+    experiment_id = record_training(result, experiments_csv=experiments_csv, path=path)
+    return experiment_id, result.final_weights, result.cst
 
 

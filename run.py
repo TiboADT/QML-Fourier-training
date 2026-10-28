@@ -28,10 +28,19 @@ numbers -- pass --generic, and --circuits all to use every one of them
 (the default when --generic is given with no --circuits):
     python run.py frame-potential --generic --n-qubits 6 --reps 1 2 3 --t 2
     python run.py train --generic --circuits all --n-qubits 6 --layers 3 --reps 1 --max-steps 600
+
+Run many (circuit, reps, ...) combos concurrently across CPU cores instead
+of one at a time -- --n-workers, roughly matched to the machine's core
+count (each individual run is too small to use more than one core by
+itself, see --n-workers' own --help, so this is the lever that actually
+uses the rest of a many-core machine on a big sweep):
+    python run.py frame-potential --generic --n-qubits 6 --max-params 600 --t 2 --n-workers 16
+    python run.py train --generic --n-qubits 6 --layers 3 --max-params 600 --n-workers 16
 """
 
 import argparse
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
 
 import torch
@@ -39,6 +48,36 @@ import torch
 import frame_potential as fp
 import generic_ansatz
 from circuits import n_trainable
+
+
+def _parallel_map(fn, arg_tuples, n_workers):
+    """Apply fn(*args) for each args in arg_tuples, yielding (original_index,
+    result) pairs as they complete -- not necessarily in submission order,
+    since that's the point of running them concurrently (see
+    concurrent.futures.as_completed). n_workers <= 1 runs sequentially in
+    this process instead (no process-pool overhead, and exactly today's
+    single-worker behavior/output ordering).
+
+    Processes, not threads: Python's GIL means only one thread executes
+    Python bytecode at a time, and this project's per-circuit work is
+    dominated by Python-level overhead (building up a gate-by-gate tape,
+    looping over wires) rather than large tensor math, so threads wouldn't
+    actually run concurrently here. Separate OS processes are what
+    sidesteps the GIL for CPU-bound work like this.
+
+    `fn` must be a module-level function (not a local closure or lambda --
+    those aren't reliably picklable for sending to a worker process), and
+    every item in arg_tuples must itself be picklable (plain tensors/numbers
+    are fine).
+    """
+    if n_workers <= 1:
+        for i, args_tuple in enumerate(arg_tuples):
+            yield i, fn(*args_tuple)
+        return
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        futures = {pool.submit(fn, *args_tuple): i for i, args_tuple in enumerate(arg_tuples)}
+        for future in as_completed(futures):
+            yield futures[future], future.result()
 
 
 def parse_circuits(values, generic: bool = False):
@@ -65,6 +104,22 @@ def parse_circuits(values, generic: bool = False):
 
 
 # ── train ───────────────────────────────────────────────────────────────
+
+def _train_one(x, y, circuit_num, n_qubits, layers, reps, max_steps, batch_size, notes, generic):
+    """One (circuit, n_qubits, layers, reps) training run -- module-level
+    and self-contained (imports its own dependencies) so it can be sent to
+    a worker process by _parallel_map. Pure compute via run_training, no
+    file I/O (that happens back in the main process via record_training --
+    see run_training's own docstring for why)."""
+    import time as _time
+    from experiment_tracker import run_training
+    t0 = _time.time()
+    result = run_training(
+        x, y, circuit_num=circuit_num, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
+        max_steps=max_steps, batch_size=batch_size, notes=notes, generic=generic,
+    )
+    return result, _time.time() - t0
+
 
 def add_train_parser(sub):
     p = sub.add_parser("train", help="train circuit_set (or generic_ansatz) architectures on Fourier-series targets")
@@ -108,12 +163,23 @@ def add_train_parser(sub):
     p.add_argument("--out", default="results/", help="directory for experiments.csv / costs.csv")
     p.add_argument("--notes", default="")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--n-workers", type=int, default=1,
+                    help="train this many (circuit, n_qubits, layers, reps) combos "
+                         "concurrently, in separate OS processes (default: 1, i.e. "
+                         "today's sequential behavior). Good value: close to the "
+                         "machine's core count for a CPU run -- each run's own "
+                         "compute is too small to use more than one core by itself "
+                         "(see run.py's module docstring), so this is the lever that "
+                         "actually uses the rest of the machine on a big sweep. All "
+                         "file writing still happens in the main process (one writer, "
+                         "no concurrent-CSV-append risk), only training runs in the "
+                         "workers.")
     return p
 
 
 def cmd_train(args):
     from pennylane import numpy as pnp
-    from experiment_tracker import train_and_record
+    from experiment_tracker import record_training
     from functions import function_to_learn
 
     if args.seed is not None:
@@ -164,32 +230,72 @@ def cmd_train(args):
 
     n_runs = len(args.degrees) * args.n_functions * len(combos)
 
-    t0 = time.time()
-    run_i = 0
+    # Build the full flat work list up front -- (x, y) per (degree, fn_i) is
+    # shared across every combo trained on it (so all architectures for one
+    # target draw are compared fairly), generated once here rather than
+    # per-combo. `meta` carries the (degree, fn_i, n_qubits, layers, reps,
+    # num) label for each item, same indexing as `arg_tuples`, since the
+    # worker function itself doesn't need degree/fn_i (only used for the
+    # printed label) -- see _parallel_map/_train_one.
+    meta = []
+    arg_tuples = []
     for degree in args.degrees:
         for fn_i in range(args.n_functions):
             target = function_to_learn(degree=degree)
             x = torch.linspace(-torch.pi, torch.pi, steps=args.n_samples, requires_grad=False)
             with torch.no_grad():
                 y = target(x)
-
             for n_qubits, layers, reps, num in combos:
-                run_i += 1
-                run_t0 = time.time()
-                exp_id, weights, cst = train_and_record(
-                    x, y, circuit_num=num, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
-                    max_steps=args.max_steps, batch_size=args.batch_size,
-                    notes=args.notes, path=args.out, generic=args.generic,
-                )
-                if not args.quiet:
-                    print(f"[{run_i}/{n_runs}] ({time.time() - run_t0:.1f}s) degree={degree} fn={fn_i} "
-                          f"circuit={num} n_qubits={n_qubits} layers={layers} reps={reps} "
-                          f"final_cost={cst[-1].item():.6f}")
+                meta.append((degree, fn_i, n_qubits, layers, reps, num))
+                arg_tuples.append((x, y, num, n_qubits, layers, reps,
+                                    args.max_steps, args.batch_size, args.notes, args.generic))
+
+    t0 = time.time()
+    for i, (result, elapsed) in _parallel_map(_train_one, arg_tuples, args.n_workers):
+        degree, fn_i, n_qubits, layers, reps, num = meta[i]
+        record_training(result, path=args.out)
+        if not args.quiet:
+            print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) degree={degree} fn={fn_i} "
+                  f"circuit={num} n_qubits={n_qubits} layers={layers} reps={reps} "
+                  f"final_cost={result.cst[-1].item():.6f}")
 
     print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
 
 
 # ── frame-potential ─────────────────────────────────────────────────────
+
+def _fp_one(num, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
+            device, dtype, seed, generic):
+    """One (circuit, reps, t) frame-potential estimate -- module-level and
+    self-contained so it can be sent to a worker process by _parallel_map
+    (see _train_one's docstring for why). Already pure compute with no file
+    I/O of its own -- fp.estimate_once/estimate_until_converged never
+    touched disk, only the fp.save_estimate call in cmd_frame_potential
+    does, which stays in the main process.
+
+    GPU note: if --device cuda, every worker process opens its own CUDA
+    context on the *same* GPU -- several of them competing for one GPU's
+    memory/compute usually won't beat a single process using a larger
+    --n-samples batch (GPU throughput comes from batching within a process,
+    not from running many small processes). --n-workers is for CPU runs.
+    """
+    import time as _time
+    import torch as _torch
+    import frame_potential as _fp
+    t0 = _time.time()
+    generator = _torch.Generator().manual_seed(seed) if seed is not None else None
+    if converge:
+        est = _fp.estimate_until_converged(
+            num, n_qubits, reps, t, generic=generic,
+            n_samples=n_samples, rel_tol=rel_tol, max_batches=max_batches,
+            device=device, dtype=dtype, generator=generator, verbose=False,
+        )
+    else:
+        n = n_samples or (2 ** n_qubits * t)
+        est = _fp.estimate_once(num, n_qubits, reps, t, n, generic=generic,
+                                 device=device, dtype=dtype, generator=generator)
+    return est, _time.time() - t0
+
 
 def add_frame_potential_parser(sub):
     p = sub.add_parser("frame-potential", help="estimate F^(t) for circuit_set (or generic_ansatz) architectures")
@@ -228,6 +334,18 @@ def add_frame_potential_parser(sub):
     p.add_argument("--out", default=fp.FRAME_POTENTIAL_CSV)
     p.add_argument("--notes", default="")
     p.add_argument("--quiet", action="store_true", help="suppress the per-run report")
+    p.add_argument("--n-workers", type=int, default=1,
+                    help="estimate this many (circuit, reps, t) combos concurrently, "
+                         "in separate OS processes (default: 1, i.e. today's sequential "
+                         "behavior) -- see train's --n-workers help for why processes, "
+                         "not threads. Intended for --device cpu: for cuda, several "
+                         "worker processes share one GPU and usually lose to a single "
+                         "process with a bigger --n-samples batch instead (see _fp_one's "
+                         "docstring). With --converge and --n-workers > 1, the "
+                         "already-exhausted-at-a-smaller-reps skip (`stuck`) is not "
+                         "applied across workers -- each combo runs independently, so a "
+                         "few extra already-doomed convergence attempts (bounded by "
+                         "--max-batches each) can happen instead of being skipped.")
     return p
 
 
@@ -323,46 +441,67 @@ def cmd_frame_potential(args):
         print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
               f"reps={reps_list} t={args.t} converge={args.converge}")
 
-    # (num, t) pairs where a smaller reps already exhausted --max-batches
-    # without satisfying estimate_until_converged's own stopping rule.
-    # combos is built with reps non-decreasing for any fixed (num, t) (both
-    # branches above sweep reps in increasing order per circuit), so once a
-    # pair lands here every later occurrence is a strictly larger reps --
-    # safe to skip: more reps can only move F^(t) closer to Haar, shrinking
-    # delta further, which only makes the (already unmet) rel_tol*delta
-    # target harder to hit, never easier. Re-running would just burn
-    # another full --max-batches for no new information.
-    stuck = set()
-
     n_runs = len(combos)
     t0 = time.time()
-    for i, (num, reps, t) in enumerate(combos, start=1):
-        if args.converge and (num, t) in stuck:
-            print(f"[{i}/{n_runs}] skipped: circuit {num} (t={t}) already exhausted "
-                  f"--max-batches={args.max_batches} without converging at a smaller reps -- "
-                  "more reps won't change that, only raising --max-batches would.")
-            continue
 
-        run_t0 = time.time()
-        if args.converge:
-            est = fp.estimate_until_converged(
-                num, args.n_qubits, reps, t, generic=args.generic,
-                n_samples=args.n_samples, rel_tol=args.rel_tol, max_batches=args.max_batches,
-                device=device, dtype=dtype, generator=generator, verbose=not args.quiet,
-            )
-            if not _converged(est, args.rel_tol):
-                stuck.add((num, t))
-        else:
-            n_samples = args.n_samples or (2 ** args.n_qubits * t)
-            est = fp.estimate_once(
-                num, args.n_qubits, reps, t, n_samples, generic=args.generic,
-                device=device, dtype=dtype, generator=generator,
-            )
-        fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic,
-                          device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
-        if not args.quiet:
-            print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) \n" +
-                  fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic))
+    if args.n_workers <= 1:
+        # (num, t) pairs where a smaller reps already exhausted --max-batches
+        # without satisfying estimate_until_converged's own stopping rule.
+        # combos is built with reps non-decreasing for any fixed (num, t) (both
+        # branches above sweep reps in increasing order per circuit), so once a
+        # pair lands here every later occurrence is a strictly larger reps --
+        # safe to skip: more reps can only move F^(t) closer to Haar, shrinking
+        # delta further, which only makes the (already unmet) rel_tol*delta
+        # target harder to hit, never easier. Re-running would just burn
+        # another full --max-batches for no new information. Only tracked
+        # sequentially -- see the --n-workers > 1 branch below for why.
+        stuck = set()
+        for i, (num, reps, t) in enumerate(combos, start=1):
+            if args.converge and (num, t) in stuck:
+                print(f"[{i}/{n_runs}] skipped: circuit {num} (t={t}) already exhausted "
+                      f"--max-batches={args.max_batches} without converging at a smaller reps -- "
+                      "more reps won't change that, only raising --max-batches would.")
+                continue
+            run_t0 = time.time()
+            if args.converge:
+                est = fp.estimate_until_converged(
+                    num, args.n_qubits, reps, t, generic=args.generic,
+                    n_samples=args.n_samples, rel_tol=args.rel_tol, max_batches=args.max_batches,
+                    device=device, dtype=dtype, generator=generator, verbose=not args.quiet,
+                )
+                if not _converged(est, args.rel_tol):
+                    stuck.add((num, t))
+            else:
+                n_samples = args.n_samples or (2 ** args.n_qubits * t)
+                est = fp.estimate_once(
+                    num, args.n_qubits, reps, t, n_samples, generic=args.generic,
+                    device=device, dtype=dtype, generator=generator,
+                )
+            fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic,
+                              device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
+            if not args.quiet:
+                print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) \n" +
+                      fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic))
+    else:
+        # No `stuck` skip across workers here (see --n-workers's own help):
+        # each combo is dispatched independently, with no visibility into
+        # sibling workers' outcomes. Every worker seeds its own generator
+        # from the same --seed (can't share one stateful Generator object
+        # across processes), so this branch's draws don't reproduce the
+        # n_workers<=1 branch's even at the same --seed -- same caveat
+        # cmd_train's --seed help already makes for that command.
+        arg_tuples = [
+            (num, args.n_qubits, reps, t, args.converge, args.n_samples, args.rel_tol,
+             args.max_batches, device, dtype, args.seed, args.generic)
+            for (num, reps, t) in combos
+        ]
+        for i, (est, elapsed) in _parallel_map(_fp_one, arg_tuples, args.n_workers):
+            num, reps, t = combos[i]
+            fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic,
+                              device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
+            if not args.quiet:
+                print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) \n" +
+                      fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic))
 
     print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
 
