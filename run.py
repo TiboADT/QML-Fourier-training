@@ -72,15 +72,31 @@ def _parallel_map(fn, arg_tuples, n_workers):
     those aren't reliably picklable for sending to a worker process), and
     every item in arg_tuples must itself be picklable (plain tensors/numbers
     are fine).
+
+    One task raising is not fatal to the rest of the sweep: its exception is
+    yielded in place of a result (callers check `isinstance(result,
+    Exception)`) so the caller can report it and move on. Before this, one
+    bad task (a transient CUDA OOM, say) propagated out of future.result()
+    uncaught, which aborted the whole loop immediately -- discovered the
+    hard way on a long --max-params sweep where that meant losing every
+    other task's output too, including ones that had already finished:
+    record_training (which creates the CSV in the first place) never got a
+    chance to run for *anything*.
     """
     if n_workers <= 1:
         for i, args_tuple in enumerate(arg_tuples):
-            yield i, fn(*args_tuple)
+            try:
+                yield i, fn(*args_tuple)
+            except Exception as e:
+                yield i, e
         return
     with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(fn, *args_tuple): i for i, args_tuple in enumerate(arg_tuples)}
         for future in as_completed(futures):
-            yield futures[future], future.result()
+            try:
+                yield futures[future], future.result()
+            except Exception as e:
+                yield futures[future], e
 
 
 def parse_circuits(values, generic: bool = False):
@@ -113,7 +129,23 @@ def _train_one(x, y, circuit_num, n_qubits, layers, reps, max_steps, batch_size,
     and self-contained (imports its own dependencies) so it can be sent to
     a worker process by _parallel_map. Pure compute via run_training, no
     file I/O (that happens back in the main process via record_training --
-    see run_training's own docstring for why)."""
+    see run_training's own docstring for why).
+
+    Blinds this process to CUDA first (see cmd_train's identical line for
+    why): training never asks for a GPU anywhere in its own code (no
+    --device flag even exists for `train`, unlike frame-potential), but on
+    a machine that has one, recent PyTorch optimizer internals probe
+    torch.accelerator.current_stream() on every .step() regardless -- which
+    tries to retain a CUDA context purely for that probe. With --n-workers
+    spawning many concurrent processes each doing this, that's enough
+    *context* overhead alone (no real tensors on it) to OOM the GPU, for a
+    device training was never going to use. Set again here (not just in
+    cmd_train) in case a future multiprocessing start method stops
+    inheriting the parent's already-modified environment the way today's
+    default ('fork' on Linux) does.
+    """
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
     import time as _time
     from experiment_tracker import run_training
     t0 = _time.time()
@@ -184,6 +216,9 @@ def add_train_parser(sub):
 
 
 def cmd_train(args):
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
     from pennylane import numpy as pnp
     from experiment_tracker import record_training
     from functions import function_to_learn
@@ -257,15 +292,24 @@ def cmd_train(args):
                                     args.max_steps, args.batch_size, args.notes, args.generic))
 
     t0 = time.time()
-    for i, (result, elapsed) in _parallel_map(_train_one, arg_tuples, args.n_workers):
+    n_failed = 0
+    for i, outcome in _parallel_map(_train_one, arg_tuples, args.n_workers):
         degree, fn_i, n_qubits, layers, reps, num = meta[i]
+        if isinstance(outcome, Exception):
+            n_failed += 1
+            print(f"[{i + 1}/{n_runs}] FAILED degree={degree} fn={fn_i} circuit={num} "
+                  f"n_qubits={n_qubits} layers={layers} reps={reps}: {outcome!r}")
+            continue
+        result, elapsed = outcome
         record_training(result, path=args.out)
         if not args.quiet:
             print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) degree={degree} fn={fn_i} "
                   f"circuit={num} n_qubits={n_qubits} layers={layers} reps={reps} "
                   f"final_cost={result.cst[-1].item():.6f}")
 
-    print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
+    failed_note = f", {n_failed} failed (see FAILED lines above)" if n_failed else ""
+    print(f"\nDone: {n_runs - n_failed}/{n_runs} runs recorded in {time.time() - t0:.1f}s"
+          f"{failed_note} -> {args.out}")
 
 
 # ── frame-potential ─────────────────────────────────────────────────────
@@ -501,13 +545,23 @@ def cmd_frame_potential(args):
              args.max_batches, device, dtype, args.seed, args.generic)
             for (num, reps, t) in combos
         ]
-        for i, (est, elapsed) in _parallel_map(_fp_one, arg_tuples, args.n_workers):
+        n_failed = 0
+        for i, outcome in _parallel_map(_fp_one, arg_tuples, args.n_workers):
             num, reps, t = combos[i]
+            if isinstance(outcome, Exception):
+                n_failed += 1
+                print(f"[{i + 1}/{n_runs}] FAILED circuit {num} reps={reps} t={t}: {outcome!r}")
+                continue
+            est, elapsed = outcome
             fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic,
                               device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
             if not args.quiet:
                 print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) \n" +
                       fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic))
+        failed_note = f", {n_failed} failed (see FAILED lines above)" if n_failed else ""
+        print(f"\nDone: {n_runs - n_failed}/{n_runs} runs recorded in {time.time() - t0:.1f}s"
+              f"{failed_note} -> {args.out}")
+        return
 
     print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
 
