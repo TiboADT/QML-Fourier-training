@@ -48,7 +48,7 @@ from typing import Callable, Optional
 import torch
 import pennylane as qp
 
-from circuits import circuit_set, weight_tensor_shape
+from circuits import circuit_set, weight_tensor_shape, n_trainable
 
 
 # ── device ──────────────────────────────────────────────────────────────
@@ -454,7 +454,7 @@ def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None, reps
 FRAME_POTENTIAL_CSV = "results/frame_potential.csv"
 FRAME_POTENTIAL_FIELDS = [
     "id", "timestamp", "git_commit",
-    "circuit_num", "generic", "n_qubits", "reps", "t",
+    "circuit_num", "generic", "n_qubits", "reps", "n_params", "t",
     "frame_potential", "haar_value", "delta", "ratio",
     "variance", "fidelity_error", "variance_inflation",
     "n_pairs", "device", "dtype", "seed", "notes",
@@ -479,11 +479,7 @@ def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
                    path: str = FRAME_POTENTIAL_CSV, generic: bool = False) -> str:
     """Append one row to `path` (creating it with a header if needed).
     Deriving frame_potential/delta/ratio/fidelity_error from Estimate's
-    properties rather than storing them independently makes the "file
-    doesn't match what the code would compute" bug from code review §1.5
-    structurally impossible here. generic: whether circuit_num is a
-    generic_ansatz code rather than a circuit_set number -- recorded so a
-    saved 5-digit circuit_num can't be mistaken for a legacy one."""
+    properties."""
     row_id = str(uuid.uuid4())
     row = {
         "id": row_id,
@@ -493,6 +489,7 @@ def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
         "generic": generic,
         "n_qubits": n_qubits,
         "reps": reps,
+        "n_params": n_trainable(circuit_num, n_qubits, reps, generic=generic),
         "t": est.t,
         "frame_potential": est.frame_potential,
         "haar_value": est.haar,

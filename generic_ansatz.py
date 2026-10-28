@@ -229,19 +229,7 @@ def _apply_rotation(spec: GenericSpec, params_row, wire):
 
 def _apply_entangler(spec: GenericSpec, param, wires, swap_for_parametrized: bool):
     """wires = [w0, w1] in exactly the order entangling_pairs returned the
-    pair. A fixed gate always reads it directly as [control, target] --
-    that convention is what matches circuits.py's CNOT/CZ circuits
-    (2/9/10/11/12/15/32) for every structure, including circular-
-    sequential's backward pass. A parametrized gate (CRX/CRY/CRZ) usually
-    needs it reversed, [w1, w0] = [control, target] -- matching circuits
-    4/6/8/14/17/19 -- *except* on circular-sequential's (structure 3)
-    backward pass, where circuits.py's own circuit 14 happens to use the
-    direct, un-reversed order instead (an inherited asymmetry between
-    circuit 13/14/15's forward and backward loops, not a choice made
-    here). Confirmed by reusing circuit 14's own params tensor directly
-    and finding the reversed convention gave the wrong unitary
-    specifically on that pass. `swap_for_parametrized` is build()'s
-    per-rep flag for which applies.
+    pair. A fixed gate always reads it directly as [control, target]
     """
     w0, w1 = wires
     if spec.gate_category == 0:
@@ -256,12 +244,7 @@ def _apply_entangler(spec: GenericSpec, param, wires, swap_for_parametrized: boo
 # ── shape / build ────────────────────────────────────────────────────────
 
 def _layer_cost(spec: GenericSpec, num_wires: int, rep: int) -> int:
-    """Exactly how many flat parameter entries repetition `rep` reads:
-    rotation_arity per wire actually touched this rep (not num_wires --
-    chain-brickwall's idle boundary wires read none), plus exactly one
-    entangler parameter per pair (not per wire: all-to-all has up to
-    num_wires-1 pairs sharing a wire, and each needs its own parameter,
-    never a shared one)."""
+    """Exactly how many *distinct* parameters repetition `rep` reads """
     pairs = entangling_pairs(spec, num_wires, rep)
     touched = {w for pair in pairs for w in pair}
     n_rotation = len(touched) * spec.rotation_arity
@@ -270,65 +253,62 @@ def _layer_cost(spec: GenericSpec, num_wires: int, rep: int) -> int:
 
 
 def weight_tensor_shape(code: int, num_wires: int, reps: int = 1) -> tuple:
-    """params shape: (total,), a flat vector sized to exactly what `reps`
-    repetitions plus one closing rotation-only layer actually read -- see
-    _layer_cost. No wire or pair ever shares a slot with another, and no
-    slot goes allocated-but-unread the way a rectangular (reps, num_wires,
-    width) tensor would for chain-brickwall's idle wires or all-to-all's
-    per-wire-shared columns.
+    """params shape: (reps + 1, num_wires, width)
     """
     spec = decode(code)
-    total = num_wires * spec.rotation_arity  # the closing layer
-    for rep in range(reps):
-        total += _layer_cost(spec, num_wires, rep)
-    return (total,)
+    if spec.topo_category == 0:
+        return (1, num_wires, spec.rotation_arity)
+    entangler_cols = 0
+    if spec.gate_category == 2:
+        entangler_cols = (num_wires - 1) if spec.topo_category == 2 else 1
+    return (reps + 1, num_wires, spec.rotation_arity + entangler_cols)
 
 
 def build(code: int, params, wires=None):
-    """Queue the gate sequence for `code` given a flat params tensor
-    [+ optional trailing batch dim] -- see weight_tensor_shape. `wires`
-    must be given explicitly (there's nothing to default it from once
-    num_wires alone doesn't determine wire *labels*, matching
-    circuit_set(34)'s own convention). `reps` itself is recovered by
-    consuming the flat tensor repetition by repetition until only the
-    closing layer's worth is left, the same convention circuit_set(34)
-    uses for the same reason (a flat tensor's own length doesn't carry
-    `reps` separately).
+    """Queue the gate sequence for `code` given a (reps + 1, num_wires,
+    width) params tensor [+ optional trailing batch dim] -- 
     """
     spec = decode(code)
     if wires is None:
         raise ValueError("the generic ansatz needs `wires` given explicitly")
     num_wires = len(wires)
-    closing_cost = num_wires * spec.rotation_arity
-    remaining = params.shape[0] - closing_cost
-    offset = 0
-    rep = 0
-    while remaining > 0:
+    reps = params.shape[0] - 1
+
+    for rep in range(reps):
         pairs = entangling_pairs(spec, num_wires, rep)
-        cost = _layer_cost(spec, num_wires, rep)
-        if cost == 0:
-            break  # topo_category=0: nothing left to consume in the repeated part, ever
         touched = sorted({w for pair in pairs for w in pair})
         for w in touched:
-            _apply_rotation(spec, params[offset:offset + spec.rotation_arity], wires[w])
-            offset += spec.rotation_arity
+            _apply_rotation(spec, params[rep, w, :spec.rotation_arity], wires[w])
         # see _apply_entangler's docstring: circular-sequential's backward
         # pass (structure 3, odd rep) is the one case that does NOT swap
         # which wire is control vs target.
         swap = not (spec.topo_structure == 3 and rep % 2 == 1)
+        # each pair's parameter lives at its first wire's entangler
+        # column(s) -- cp_idx_by_wire counts up per wire so all-to-all's
+        # num_wires-1 pairs per wire land on distinct columns (weight_
+        # tensor_shape's docstring has the no-collision argument/check).
+        cp_idx_by_wire = {}
         for (w0, w1) in pairs:
+            cp_idx = cp_idx_by_wire.get(w0, 0)
+            cp_idx_by_wire[w0] = cp_idx + 1
             if spec.gate_category == 2:
-                param = params[offset]
-                offset += 1
+                param = params[rep, w0, spec.rotation_arity + cp_idx]
             else:
                 param = None
             _apply_entangler(spec, param, [wires[w0], wires[w1]], swap)
-        remaining -= cost
-        rep += 1
 
+    # closing layer: always the last slice, rotation-only
     for w in range(num_wires):
-        _apply_rotation(spec, params[offset:offset + spec.rotation_arity], wires[w])
-        offset += spec.rotation_arity
+        _apply_rotation(spec, params[reps, w, :spec.rotation_arity], wires[w])
+
+
+def n_trainable(code: int, num_wires: int, reps: int = 1) -> int:
+    """Exact count of weight-tensor entries build() actually reads"""
+    spec = decode(code)
+    total = num_wires * spec.rotation_arity  # the closing layer
+    for rep in range(reps):
+        total += _layer_cost(spec, num_wires, rep)
+    return total
 
 
 # ── correspondence with circuits.py's hardcoded circuit_set(1-19) ──────────

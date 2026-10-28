@@ -180,6 +180,9 @@ def train_and_record(
         # How many times the (simulated) quantum circuit's expectation value
         # was actually estimated over the whole run.
         "n_expvals":        getattr(model, "n_expvals", None),
+        # cst[0]/cst[-1]: the first/last step's own (pre-update) batch loss --
+        # see train()'s docstring for why it's the batch loss, not a separate
+        # full-dataset evaluation.
         "initial_cost":     round(float(cst[0].item()), 8),
         "final_cost":       round(float(cst[-1].item()), 8),
         "notes":            notes,
@@ -187,9 +190,9 @@ def train_and_record(
     _append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
 
     # ---- save the cost curve -------------------------------------------
-    # cst[0] is the pre-training cost (already recorded as initial_cost above);
-    # cst[1:] holds the cost after each of the max_steps optimizer steps.
-    save_cost_curve(experiment_id, cst[1:].detach().numpy(), path=path)
+    # cst holds every one of the max_steps optimizer steps' own batch loss --
+    # no separate pre-training slot to skip any more (see train()'s docstring).
+    save_cost_curve(experiment_id, cst.detach().numpy(), path=path)
 
     print(f"[tracker] Experiment {experiment_id} saved "
           f"(circuit={circuit_num}, qubits={n_qubits}, layers={layers}, "

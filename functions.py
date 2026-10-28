@@ -24,22 +24,11 @@ def cost_model(model):
 
 
 def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step=10, display=True):
-    """`model` (from build_model) counts expectation-value estimates as it's
-    called -- see build_model's counted_circuit. That count is exact for
-    training done here specifically because this device+interface
-    combination resolves to backprop differentiation: .backward() reuses
-    the one forward pass's autodiff graph rather than triggering further
-    device executions, so every expectation value genuinely estimated
-    corresponds to exactly one `model(weights, x)` call below (never a
-    hidden multiple, the way parameter-shift gradients would need)."""
+    """`model` (from build_model) """
     weights = weights.detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([weights], lr = 0.1)
     cost = cost_model(model)
-    # cst[0] is the pre-training cost, cst[1..max_steps] the cost after each
-    # optimizer step — keeping both means neither overwrites the other.
-    cst = torch.zeros((max_steps + 1), dtype=torch.float32)
-    with torch.no_grad():
-        cst[0] = cost(weights, x, target_y)  # initial cost
+    cst = torch.zeros(max_steps, dtype=torch.float32)
 
     def closure():
         opt.zero_grad()
@@ -53,14 +42,13 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
         x_batch = x[perm[:batch_size]]
         y_batch = target_y[perm[:batch_size]]
 
-        # update the weights by one optimizer step
+        # update the weights by one optimizer step, and record that step's
+        # own (pre-update) batch loss -- already computed, nothing more to do
+        loss = opt.step(closure)
+        cst[step] = loss.detach()
 
-        opt.step(closure)
-
-        # save, and possibly print, the current cost
-        cst[step + 1] = cost(weights, x, target_y).detach().item()
         if (step + 1) % display_step == 0 and display:
-            print("                 Cost at step {0:3}: {1}".format(step + 1, cst[step + 1]))
+            print("                 Cost at step {0:3}: {1}".format(step + 1, cst[step]))
     return weights.detach(), cst
 
 

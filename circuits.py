@@ -694,8 +694,11 @@ def n_trainable(num, num_wires, reps=1, generic: bool = False):
     zero gradient; a coincidental zero from a used entry has probability zero
     under random projection weights and random input angles.
 
-    generic=True: `num` is a generic_ansatz code -- see circuit_set.
+    generic=True: `num` is a generic_ansatz code
     """
+    if generic:
+        import generic_ansatz
+        return generic_ansatz.n_trainable(num, num_wires, reps)
     shape = weight_tensor_shape(num, num_wires, reps, generic=generic)
     generator = torch.Generator().manual_seed(0)
     weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64, generator=generator)
