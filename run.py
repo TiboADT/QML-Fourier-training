@@ -44,10 +44,13 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
 
 import torch
+import torch.multiprocessing
 
 import frame_potential as fp
 import generic_ansatz
 from circuits import n_trainable
+
+torch.multiprocessing.set_sharing_strategy("file_system")
 
 
 def _parallel_map(fn, arg_tuples, n_workers):
@@ -118,6 +121,9 @@ def _train_one(x, y, circuit_num, n_qubits, layers, reps, max_steps, batch_size,
         x, y, circuit_num=circuit_num, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
         max_steps=max_steps, batch_size=batch_size, notes=notes, generic=generic,
     )
+    # record_training (the only thing cmd_train does with the returned
+    # result) never reads final_weights -- dropping it here
+    result.final_weights = None
     return result, _time.time() - t0
 
 
