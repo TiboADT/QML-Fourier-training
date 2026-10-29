@@ -39,6 +39,7 @@ uses the rest of a many-core machine on a big sweep):
 """
 
 import argparse
+import multiprocessing
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
@@ -82,6 +83,20 @@ def _parallel_map(fn, arg_tuples, n_workers):
     other task's output too, including ones that had already finished:
     record_training (which creates the CSV in the first place) never got a
     chance to run for *anything*.
+
+    Workers start via 'spawn' (a fresh Python interpreter each), not
+    ProcessPoolExecutor's platform default ('fork' on Linux). fork()-ing a
+    process that has already imported/used torch is a documented deadlock
+    hazard: PyTorch's own internal thread pool (OpenMP/MKL) may be holding
+    a lock at the instant of the fork, and the child inherits the *memory*
+    of that lock being held but not the thread that would ever release it
+    -- so the first thing any worker does that needs it blocks forever.
+    Every worker hits this identically (confirmed live: all workers alive,
+    0% CPU, the same few hundred ms of startup time each, no error, no
+    crash, no progress -- not a resource limit or a slow start). spawn
+    avoids this entirely at the cost of slower worker startup (each
+    re-imports torch/pennylane from scratch -- seconds, not milliseconds,
+    but once per worker, not per task).
     """
     if n_workers <= 1:
         for i, args_tuple in enumerate(arg_tuples):
@@ -90,7 +105,8 @@ def _parallel_map(fn, arg_tuples, n_workers):
             except Exception as e:
                 yield i, e
         return
-    with ProcessPoolExecutor(max_workers=n_workers) as pool:
+    ctx = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
         futures = {pool.submit(fn, *args_tuple): i for i, args_tuple in enumerate(arg_tuples)}
         for future in as_completed(futures):
             try:
