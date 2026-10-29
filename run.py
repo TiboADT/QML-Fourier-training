@@ -40,6 +40,7 @@ uses the rest of a many-core machine on a big sweep):
 
 import argparse
 import multiprocessing
+import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
@@ -97,6 +98,26 @@ def _parallel_map(fn, arg_tuples, n_workers):
     avoids this entirely at the cost of slower worker startup (each
     re-imports torch/pennylane from scratch -- seconds, not milliseconds,
     but once per worker, not per task).
+
+    Each worker's own BLAS/OpenMP thread pool is capped to 1 thread before
+    any are spawned: left alone, every one of the n_workers processes
+    independently sizes its internal thread pool to the *whole machine's*
+    core count (confirmed live: 80 workers x ~96 threads each -> 13,553
+    threads total, load average 2216 on a 96-core box, system-wide lag).
+    The parallelism here is meant to come entirely from n_workers
+    independent *processes* -- each one single-threaded is the right
+    building block for that, not n_workers processes each ALSO trying to
+    be internally multi-threaded on top of it. Must be set as an
+    environment variable in THIS (parent) process before the pool is
+    created, not inside the worker function: torch sizes its thread pool
+    from these vars at import time, and by the time any of our own code
+    (_train_one/_fp_one) runs inside a freshly-spawned worker, this
+    module's own top-level `import torch` (re-executed because 'spawn'
+    re-imports the module to find the target function) has already
+    triggered that sizing -- too late to fix from inside the worker itself,
+    only early enough if the *spawned process* inherits the variable
+    already set, which it does from this parent's environment at spawn
+    time.
     """
     if n_workers <= 1:
         for i, args_tuple in enumerate(arg_tuples):
@@ -105,6 +126,8 @@ def _parallel_map(fn, arg_tuples, n_workers):
             except Exception as e:
                 yield i, e
         return
+    for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[var] = "1"
     ctx = multiprocessing.get_context("spawn")
     with ProcessPoolExecutor(max_workers=n_workers, mp_context=ctx) as pool:
         futures = {pool.submit(fn, *args_tuple): i for i, args_tuple in enumerate(arg_tuples)}
