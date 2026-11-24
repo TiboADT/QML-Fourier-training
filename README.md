@@ -54,6 +54,7 @@ make install
 ## Training
 
 ```python
+from architectures import get_architecture
 from experiment_tracker import train_and_record
 from functions import function_to_learn
 import torch
@@ -62,7 +63,8 @@ target = function_to_learn(degree=2)
 x = torch.linspace(-torch.pi, torch.pi, 800)
 y = target(x)
 
-train_and_record(x, y, circuit_num=7, n_qubits=6, layers=3, anzats_reps=1,
+arch = get_architecture(7)  # or get_architecture(21110, generic=True) for a generic_ansatz code
+train_and_record(x, y, arch, n_qubits=6, layers=3, anzats_reps=1,
                   max_steps=600, path="results/")
 ```
 

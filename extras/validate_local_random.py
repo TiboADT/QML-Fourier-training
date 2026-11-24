@@ -33,6 +33,9 @@ import time
 import torch
 
 import frame_potential as fp
+from architectures import get_architecture
+
+_ARCH_34 = get_architecture(34)
 
 
 def check_single_block(n_samples=8000, ts=(1, 2, 3)):
@@ -54,7 +57,7 @@ def check_single_block(n_samples=8000, ts=(1, 2, 3)):
     print(f"--- circuit 34 (single block, n_qubits=2, reps=2), n_samples={n_samples} ---")
     device = torch.device("cpu")
     for t in ts:
-        est = fp.estimate_once(34, n_qubits=2, reps=2, t=t, n_samples=n_samples,
+        est = fp.estimate_once(_ARCH_34, n_qubits=2, reps=2, t=t, n_samples=n_samples,
                                 device=device, dtype=torch.complex128)
         within_ci = abs(est.delta) <= max(est.fidelity_error, 1e-9)
         print(f"  t={t}  F={est.frame_potential:.4f}  Haar={est.haar:.1f}  "
@@ -72,7 +75,7 @@ def check_brickwork_depth(n_qubits=4, reps_list=(1, 2, 4, 8), t=2, n_samples=400
     device = torch.device("cpu")
     haar = math.factorial(t)
     for reps in reps_list:
-        est = fp.estimate_once(34, n_qubits=n_qubits, reps=reps, t=t, n_samples=n_samples,
+        est = fp.estimate_once(_ARCH_34, n_qubits=n_qubits, reps=reps, t=t, n_samples=n_samples,
                                 device=device, dtype=torch.complex128)
         print(f"  reps={reps:<3d}  F={est.frame_potential:.4f}  Haar={haar:.1f}  "
               f"ratio={est.ratio:.4f}")
@@ -93,7 +96,7 @@ def check_convergence_pathology(n_qubits=2, reps=2, t=2, rel_tol=0.3, max_batche
     print(f"--- convergence-loop diagnostic: estimate_until_converged(34, t={t}) ---")
     device = torch.device("cpu")
     t0 = time.time()
-    est = fp.estimate_until_converged(34, n_qubits=n_qubits, reps=reps, t=t, rel_tol=rel_tol,
+    est = fp.estimate_until_converged(_ARCH_34, n_qubits=n_qubits, reps=reps, t=t, rel_tol=rel_tol,
                                        max_batches=max_batches, device=device,
                                        dtype=torch.complex128)
     elapsed = time.time() - t0

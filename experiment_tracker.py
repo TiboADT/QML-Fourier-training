@@ -8,7 +8,7 @@ import numpy as np
 
 import results_io
 from functions import train, build_model
-from circuits import n_trainable
+from architectures import Architecture
 
 # ------------------------------------------------------------------
 # Paths (override before importing if needed)
@@ -103,7 +103,7 @@ class TrainingResult:
 def run_training(
     x,
     target_y,
-    circuit_num: int,
+    arch: Architecture,
     n_qubits: int,
     layers: int,
     anzats_reps: int,
@@ -112,7 +112,6 @@ def run_training(
     display_step: int = 10,
     notes: str = "",
     train_fn = train,
-    generic: bool = False,
 ) -> TrainingResult:
     """Build the model and run `train` -- pure compute, no file I/O. Split
     out of train_and_record so the expensive part (this) can run in a
@@ -122,8 +121,8 @@ def run_training(
     only ever call record_training from one process at a time against a
     given `path`. See run.py's `--n-workers` for the parallel caller.
     """
-    model, weights = build_model(circuit_num, n_qubits, layers, anzats_reps,
-                                  measuring_qubit=n_qubits - 1, generic=generic)
+    model, weights = build_model(arch, n_qubits, layers, anzats_reps,
+                                  measuring_qubit=n_qubits - 1)
 
     final_weights, cst = train_fn(
         model, weights, x, target_y,
@@ -134,15 +133,15 @@ def run_training(
     )
 
     return TrainingResult(
-        circuit_num=circuit_num,
-        generic=generic,
+        circuit_num=arch.num,
+        generic=arch.generic,
         n_qubits=n_qubits,
         layers=layers,
         anzats_reps=anzats_reps,
         # weight_tensor_shape allocates a rectangular tensor, but several
         # circuits don't read all of it — count what's
         # actually trainable rather than the raw tensor size.
-        n_params=layers * n_trainable(circuit_num, n_qubits, anzats_reps, generic=generic),
+        n_params=layers * arch.n_trainable(n_qubits, anzats_reps),
         n_train_samples=len(x),
         max_steps=max_steps,
         batch_size=batch_size,
@@ -212,7 +211,7 @@ def record_training(
 def train_and_record(
     x,
     target_y,
-    circuit_num: int,
+    arch: Architecture,
     n_qubits: int,
     layers: int,
     anzats_reps: int,
@@ -223,7 +222,6 @@ def train_and_record(
     experiments_csv: str = EXPERIMENTS_CSV,
     train_fn = train,
     path: str = "results/",
-    generic: bool = False,
 ):
     """
     Run `run_training` then `record_training` -- the single-call,
@@ -239,9 +237,9 @@ def train_and_record(
     cost_history : torch.Tensor  shape (max_steps,)
     """
     result = run_training(
-        x, target_y, circuit_num, n_qubits, layers, anzats_reps,
+        x, target_y, arch, n_qubits, layers, anzats_reps,
         max_steps=max_steps, batch_size=batch_size, display_step=display_step,
-        notes=notes, train_fn=train_fn, generic=generic,
+        notes=notes, train_fn=train_fn,
     )
     experiment_id = record_training(result, experiments_csv=experiments_csv, path=path)
     return experiment_id, result.final_weights, result.cst

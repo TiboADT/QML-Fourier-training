@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 import torch
 
-from circuits import circuit_set, weight_tensor_shape
+from architectures import Architecture
 
 # ── Training and cost functions ───────────────────────────────────────────────
 
@@ -52,13 +52,12 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
     return weights.detach(), cst
 
 
-def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit = 0, generic: bool = False):
-    """Build a model for the given circuit number, number of qubits, and repetitions.
-    generic=True: `circuit_num` is a generic_ansatz code"""
+def build_model(arch: Architecture, n_qubits, layers, anzats_reps = 1, measuring_qubit = 0):
+    """Build a model for the given architecture, number of qubits, and repetitions."""
 
-    circuit_to_call = circuit_set(num=circuit_num, generic=generic)
+    circuit_to_call = arch.build
 
-    weights_shape = weight_tensor_shape(circuit_num, n_qubits, anzats_reps, generic=generic)
+    weights_shape = arch.weight_shape(n_qubits, anzats_reps)
     weights_shape = (layers,) + weights_shape
     weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True)
 

@@ -50,7 +50,7 @@ import torch.multiprocessing
 
 import frame_potential as fp
 import generic_ansatz
-from circuits import n_trainable
+from architectures import get_architecture
 
 torch.multiprocessing.set_sharing_strategy("file_system")
 
@@ -163,7 +163,7 @@ def parse_circuits(values, generic: bool = False):
 
 # ── train ───────────────────────────────────────────────────────────────
 
-def _train_one(x, y, circuit_num, n_qubits, layers, reps, max_steps, batch_size, notes, generic):
+def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes):
     """One (circuit, n_qubits, layers, reps) training run -- module-level
     and self-contained (imports its own dependencies) so it can be sent to
     a worker process by _parallel_map. Pure compute via run_training, no
@@ -189,8 +189,8 @@ def _train_one(x, y, circuit_num, n_qubits, layers, reps, max_steps, batch_size,
     from experiment_tracker import run_training
     t0 = _time.time()
     result = run_training(
-        x, y, circuit_num=circuit_num, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
-        max_steps=max_steps, batch_size=batch_size, notes=notes, generic=generic,
+        x, y, arch, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
+        max_steps=max_steps, batch_size=batch_size, notes=notes,
     )
     # record_training (the only thing cmd_train does with the returned
     # result) never reads final_weights -- dropping it here
@@ -287,14 +287,15 @@ def cmd_train(args):
         for n_qubits in args.n_qubits:
             for layers in args.layers:
                 for i, num in enumerate(circuits, start=1):
+                    arch = get_architecture(num, generic=args.generic)
                     t_budget0 = time.time()
-                    reps_list = reps_for_param_budget(num, n_qubits, args.max_params,
-                                                        multiplier=layers, generic=args.generic)
+                    reps_list = reps_for_param_budget(arch, n_qubits, args.max_params,
+                                                        multiplier=layers)
                     print(f"  [{i}/{len(circuits)}] circuit {num} (n_qubits={n_qubits}, layers={layers}): "
                           f"reps={reps_list} ({time.time() - t_budget0:.1f}s)")
                     if not reps_list:
                         print(f"    skipped -- even reps=1 already has "
-                              f"{layers * n_trainable(num, n_qubits, 1, generic=args.generic)} "
+                              f"{layers * arch.n_trainable(n_qubits, 1)} "
                               f"trainable parameters, over --max-params {args.max_params}")
                         continue
                     combos.extend((n_qubits, layers, reps, num) for reps in reps_list)
@@ -327,8 +328,9 @@ def cmd_train(args):
                 y = target(x)
             for n_qubits, layers, reps, num in combos:
                 meta.append((degree, fn_i, n_qubits, layers, reps, num))
-                arg_tuples.append((x, y, num, n_qubits, layers, reps,
-                                    args.max_steps, args.batch_size, args.notes, args.generic))
+                arch = get_architecture(num, generic=args.generic)
+                arg_tuples.append((x, y, arch, n_qubits, layers, reps,
+                                    args.max_steps, args.batch_size, args.notes))
 
     t0 = time.time()
     n_failed = 0
@@ -353,8 +355,8 @@ def cmd_train(args):
 
 # ── frame-potential ─────────────────────────────────────────────────────
 
-def _fp_one(num, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
-            device, dtype, seed, generic):
+def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
+            device, dtype, seed):
     """One (circuit, reps, t) frame-potential estimate -- module-level and
     self-contained so it can be sent to a worker process by _parallel_map
     (see _train_one's docstring for why). Already pure compute with no file
@@ -375,13 +377,13 @@ def _fp_one(num, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
     generator = _torch.Generator().manual_seed(seed) if seed is not None else None
     if converge:
         est = _fp.estimate_until_converged(
-            num, n_qubits, reps, t, generic=generic,
+            arch, n_qubits, reps, t,
             n_samples=n_samples, rel_tol=rel_tol, max_batches=max_batches,
             device=device, dtype=dtype, generator=generator, verbose=False,
         )
     else:
         n = n_samples or (2 ** n_qubits * t)
-        est = _fp.estimate_once(num, n_qubits, reps, t, n, generic=generic,
+        est = _fp.estimate_once(arch, n_qubits, reps, t, n,
                                  device=device, dtype=dtype, generator=generator)
     return est, _time.time() - t0
 
@@ -438,9 +440,9 @@ def add_frame_potential_parser(sub):
     return p
 
 
-def reps_for_param_budget(num, n_qubits, max_params, multiplier=1, generic: bool = False):
-    """All reps = 1, 2, 3, ... whose multiplier * circuits.n_trainable(num,
-    n_qubits, reps) stays at or under max_params -- not the raw allocated
+def reps_for_param_budget(arch, n_qubits, max_params, multiplier=1):
+    """All reps = 1, 2, 3, ... whose multiplier * arch.n_trainable(n_qubits,
+    reps) stays at or under max_params -- not the raw allocated
     weight-tensor size (several circuits don't read all of it, see
     n_trainable's own docstring), so circuits compared at the same
     max_params are matched on real degrees of freedom. Returns the full
@@ -456,7 +458,6 @@ def reps_for_param_budget(num, n_qubits, max_params, multiplier=1, generic: bool
     *total* trainable-parameter count a training run actually has is that
     product, not n_trainable alone).
 
-    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
     Some generic_ansatz codes (topo_category=0 -- no entangling topology at
     all, e.g. 20000) deliberately collapse to the same fixed-size single
     rotation layer for *every* reps (see generic_ansatz's module docstring),
@@ -467,7 +468,7 @@ def reps_for_param_budget(num, n_qubits, max_params, multiplier=1, generic: bool
     reps = 1
     prev_n = None
     while True:
-        n = multiplier * n_trainable(num, n_qubits, reps, generic=generic)
+        n = multiplier * arch.n_trainable(n_qubits, reps)
         if n > max_params or n == prev_n:
             break
         reps_list.append(reps)
@@ -512,13 +513,14 @@ def cmd_frame_potential(args):
         # list finishes.
         combos = []
         for i, num in enumerate(circuits, start=1):
+            arch = get_architecture(num, generic=args.generic)
             t_budget0 = time.time()
-            reps_list = reps_for_param_budget(num, args.n_qubits, args.max_params, generic=args.generic)
+            reps_list = reps_for_param_budget(arch, args.n_qubits, args.max_params)
             print(f"  [{i}/{len(circuits)}] circuit {num}: reps={reps_list} "
                   f"({time.time() - t_budget0:.1f}s)")
             if not reps_list:
                 print(f"    skipped -- even reps=1 already has "
-                      f"{n_trainable(num, args.n_qubits, 1, generic=args.generic)} trainable parameters, "
+                      f"{arch.n_trainable(args.n_qubits, 1)} trainable parameters, "
                       f"over --max-params {args.max_params}")
                 continue
             combos.extend(product([num], reps_list, args.t))
@@ -551,10 +553,11 @@ def cmd_frame_potential(args):
                       f"--max-batches={args.max_batches} without converging at a smaller reps -- "
                       "more reps won't change that, only raising --max-batches would.")
                 continue
+            arch = get_architecture(num, generic=args.generic)
             run_t0 = time.time()
             if args.converge:
                 est = fp.estimate_until_converged(
-                    num, args.n_qubits, reps, t, generic=args.generic,
+                    arch, args.n_qubits, reps, t,
                     n_samples=args.n_samples, rel_tol=args.rel_tol, max_batches=args.max_batches,
                     device=device, dtype=dtype, generator=generator, verbose=not args.quiet,
                 )
@@ -563,14 +566,14 @@ def cmd_frame_potential(args):
             else:
                 n_samples = args.n_samples or (2 ** args.n_qubits * t)
                 est = fp.estimate_once(
-                    num, args.n_qubits, reps, t, n_samples, generic=args.generic,
+                    arch, args.n_qubits, reps, t, n_samples,
                     device=device, dtype=dtype, generator=generator,
                 )
-            fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic,
+            fp.save_estimate(est, arch=arch, n_qubits=args.n_qubits, reps=reps,
                               device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
             if not args.quiet:
                 print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) \n" +
-                      fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic))
+                      fp.report(est, arch=arch, n_qubits=args.n_qubits, reps=reps))
     else:
         # No `stuck` skip across workers here (see --n-workers's own help):
         # each combo is dispatched independently, with no visibility into
@@ -580,23 +583,24 @@ def cmd_frame_potential(args):
         # n_workers<=1 branch's even at the same --seed -- same caveat
         # cmd_train's --seed help already makes for that command.
         arg_tuples = [
-            (num, args.n_qubits, reps, t, args.converge, args.n_samples, args.rel_tol,
-             args.max_batches, device, dtype, args.seed, args.generic)
+            (get_architecture(num, generic=args.generic), args.n_qubits, reps, t, args.converge,
+             args.n_samples, args.rel_tol, args.max_batches, device, dtype, args.seed)
             for (num, reps, t) in combos
         ]
         n_failed = 0
         for i, outcome in _parallel_map(_fp_one, arg_tuples, args.n_workers):
             num, reps, t = combos[i]
+            arch = get_architecture(num, generic=args.generic)
             if isinstance(outcome, Exception):
                 n_failed += 1
                 print(f"[{i + 1}/{n_runs}] FAILED circuit {num} reps={reps} t={t}: {outcome!r}")
                 continue
             est, elapsed = outcome
-            fp.save_estimate(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic,
+            fp.save_estimate(est, arch=arch, n_qubits=args.n_qubits, reps=reps,
                               device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
             if not args.quiet:
                 print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) \n" +
-                      fp.report(est, circuit_num=num, n_qubits=args.n_qubits, reps=reps, generic=args.generic))
+                      fp.report(est, arch=arch, n_qubits=args.n_qubits, reps=reps))
         failed_note = f", {n_failed} failed (see FAILED lines above)" if n_failed else ""
         print(f"\nDone: {n_runs - n_failed}/{n_runs} runs recorded in {time.time() - t0:.1f}s"
               f"{failed_note} -> {args.out}")

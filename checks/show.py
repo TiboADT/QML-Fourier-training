@@ -44,7 +44,7 @@ import shutil
 import pennylane as qp
 import torch
 
-from circuits import circuit_set, weight_tensor_shape
+from architectures import get_architecture
 from extras.range_connectivity import draw_display_circuit
 
 # Purely-cosmetic ops to drop from the *diagram* only (never from the
@@ -89,11 +89,11 @@ def _show(tape, title: str, mpl_path, decimals=None):
 
 
 def show_circuit_set(num: int, n_qubits: int, reps: int, mpl_path, generic: bool = False, decimals=None):
-    shape = weight_tensor_shape(num, n_qubits, reps, generic=generic)
+    arch = get_architecture(num, generic=generic)
+    shape = arch.weight_shape(n_qubits, reps)
     weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64)
-    tape = _build_tape(lambda: circuit_set(num=num, generic=generic)(weights, wires=list(range(n_qubits))))
-    label = "generic_ansatz" if generic else "circuit_set"
-    title = f"{label}({num}), n_qubits={n_qubits}, reps={reps}, weight shape={tuple(shape)}\n"
+    tape = _build_tape(lambda: arch.build(weights, wires=list(range(n_qubits))))
+    title = f"{arch.label}, n_qubits={n_qubits}, reps={reps}, weight shape={tuple(shape)}\n"
     _show(tape, title, mpl_path, decimals=decimals)
 
 

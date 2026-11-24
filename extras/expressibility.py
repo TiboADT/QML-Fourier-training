@@ -26,21 +26,20 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from frame_potential import get_device, sample_unitaries
+from architectures import Architecture
 
 
-def sample_fidelities(num: int, n_qubits: int, reps: int, batch_size: int, *,
-                       generic: bool = False,
+def sample_fidelities(arch: Architecture, n_qubits: int, reps: int, batch_size: int, *,
                        device: Optional[torch.device] = None,
                        dtype: torch.dtype = torch.complex64,
                        generator: Optional[torch.Generator] = None) -> torch.Tensor:
     """All pairwise fidelities F = |<0|U_i^dag U_j|0>|^2 between the two
-    independent halves of a batch_size-sample draw of circuit_set(num)'s
-    output state (starting from |0...0>) -- see this module's docstring
-    for why that's just the overlap of U's first columns. Splitting
-    into two independent halves (same convention as
-    estimate_once_from_sampler) means no U_i is ever compared against
-    itself, which would be an identically-1 self-overlap biasing the
-    distribution.
+    independent halves of a batch_size-sample draw of arch's output state
+    (starting from |0...0>) -- see this module's docstring for why that's
+    just the overlap of U's first columns. Splitting into two independent
+    halves (same convention as estimate_once_from_sampler) means no U_i is
+    ever compared against itself, which would be an identically-1
+    self-overlap biasing the distribution.
 
     Returns a flat real Tensor[n_a * n_b] of fidelity samples. Unlike
     estimate_once_from_sampler, this does not retry on CUDA OOM by halving
@@ -51,9 +50,9 @@ def sample_fidelities(num: int, n_qubits: int, reps: int, batch_size: int, *,
         device = get_device()
     n_a = batch_size // 2
     n_b = batch_size - n_a
-    UA = sample_unitaries(num, n_qubits, reps, n_a, generic=generic,
+    UA = sample_unitaries(arch, n_qubits, reps, n_a,
                            device=device, dtype=dtype, generator=generator)
-    UB = sample_unitaries(num, n_qubits, reps, n_b, generic=generic,
+    UB = sample_unitaries(arch, n_qubits, reps, n_b,
                            device=device, dtype=dtype, generator=generator)
     psi_A = UA[:, :, 0]  # (n_a, d): U_i|0> -- U's first column
     psi_B = UB[:, :, 0]  # (n_b, d)
@@ -126,17 +125,17 @@ class KLEstimate:
                            n_bins=self.n_bins, d=self.d)
 
 
-def expressibility_once(num: int, n_qubits: int, reps: int, n_samples: int, *,
-                         n_bins: int = 75, generic: bool = False,
+def expressibility_once(arch: Architecture, n_qubits: int, reps: int, n_samples: int, *,
+                         n_bins: int = 75,
                          device: Optional[torch.device] = None,
                          dtype: torch.dtype = torch.complex64,
                          generator: Optional[torch.Generator] = None) -> KLEstimate:
     """One Monte Carlo batch's worth of expressibility (KL divergence vs.
-    Haar) for circuit_set(num). n_bins=75 matches Sim, Johnson &
+    Haar) for arch. n_bins=75 matches Sim, Johnson &
     Aspuru-Guzik (2019)'s own convention. See sample_fidelities/KLEstimate.
     """
     d = 2 ** n_qubits
-    fidelities = sample_fidelities(num, n_qubits, reps, n_samples, generic=generic,
+    fidelities = sample_fidelities(arch, n_qubits, reps, n_samples,
                                     device=device, dtype=dtype, generator=generator)
     counts = torch.histc(fidelities.cpu(), bins=n_bins, min=0.0, max=1.0)
     haar_probs = _haar_fidelity_bin_probs(d, n_bins)

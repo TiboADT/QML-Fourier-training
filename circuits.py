@@ -87,23 +87,16 @@ def _brickwork_layer_pairs(num_wires: int, layer: int) -> int:
     return num_pairs - layer % 2 * wires_parity
 
 
-def circuit_set(num: int = None, generic: bool = False):
+def circuit_set(num: int = None):
     """Return a function corresponding to the numbered circuit.
 
     Circuits 1–19 are direct translations of the Qiskit circuit_set circuits.
 
-    generic=True: `num` is a 5-digit generic_ansatz code instead of one of
-    the hardcoded numbers below -- see generic_ansatz.py's module
-    docstring for the encoding.
+    For a generic_ansatz code (the 5-digit encoding in generic_ansatz.py's
+    module docstring) instead of one of the hardcoded numbers below, use
+    architectures.Architecture(num, generic=True) rather than this function
+    directly.
     """
-    if generic:
-        import generic_ansatz
-
-        def generic_circuit(params, wires=None):
-            generic_ansatz.build(num, params, wires=wires)
-
-        return generic_circuit
-
     if num is None:
         raise ValueError("You must provide a circuit number.")
 
@@ -602,15 +595,12 @@ def circuit_set(num: int = None, generic: bool = False):
         raise ValueError(f"Circuit number {num} is not defined.")
     
 
-def weight_tensor_shape(num, num_wires, reps = 1, generic: bool = False):
+def weight_tensor_shape(num, num_wires, reps = 1):
     """
     Return the needed shape of the weight tensor for a given circuit number.
-    generic=True: `num` is a generic_ansatz code -- see circuit_set.
+    For a generic_ansatz code, use architectures.Architecture.weight_shape
+    instead of this function directly.
     """
-    if generic:
-        import generic_ansatz
-        return generic_ansatz.weight_tensor_shape(num, num_wires, reps)
-
     if num == 1:
         return (reps, num_wires, 2)
     elif num == 2:
@@ -659,7 +649,7 @@ def weight_tensor_shape(num, num_wires, reps = 1, generic: bool = False):
         raise ValueError(f"Circuit number {num} is not defined.")
 
 
-def n_trainable(num, num_wires, reps=1, generic: bool = False):
+def n_trainable(num, num_wires, reps=1):
     """Number of weight-tensor entries that circuit_set(num) actually reads.
 
     weight_tensor_shape allocates a rectangular tensor, but several circuits
@@ -671,12 +661,11 @@ def n_trainable(num, num_wires, reps=1, generic: bool = False):
     zero gradient; a coincidental zero from a used entry has probability zero
     under random projection weights and random input angles.
 
-    generic=True: `num` is a generic_ansatz code
+    For a generic_ansatz code, use architectures.Architecture.n_trainable
+    instead of this function directly -- generic_ansatz has an exact
+    closed-form count, so there's no need to probe it this way.
     """
-    if generic:
-        import generic_ansatz
-        return generic_ansatz.n_trainable(num, num_wires, reps)
-    shape = weight_tensor_shape(num, num_wires, reps, generic=generic)
+    shape = weight_tensor_shape(num, num_wires, reps)
     generator = torch.Generator().manual_seed(0)
     weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64, generator=generator)
     weights.requires_grad_(True)
@@ -684,7 +673,7 @@ def n_trainable(num, num_wires, reps=1, generic: bool = False):
 
     @qp.qnode(dev, interface="torch", diff_method="backprop")
     def probe(weights):
-        circuit_set(num=num, generic=generic)(weights, wires=list(range(num_wires)))
+        circuit_set(num=num)(weights, wires=list(range(num_wires)))
         # qp.state() (not qp.probs()) so phase-only gates (e.g. a trailing RZ)
         # are visible too — probabilities in the computational basis are blind
         # to them, which would falsely mark their parameters as unused.

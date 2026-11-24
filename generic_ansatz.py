@@ -2,9 +2,9 @@
 circuits.py's hardcoded circuit_set(1-34), for assembling new
 (rotation, entanglement) combinations from a small set of axes instead of
 hand-writing a new circuit_set branch per combination. Circuits 1-34 are
-untouched; this is reached via circuit_set(num=CODE, generic=True) (and
-the matching weight_tensor_shape(..., generic=True) / n_trainable(...,
-generic=True)).
+untouched; this is reached via architectures.Architecture(num=CODE,
+generic=True) (its .build/.weight_shape/.n_trainable dispatch here instead
+of to circuits.py).
 
 Encoding
 --------
