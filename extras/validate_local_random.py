@@ -1,5 +1,4 @@
-"""Calibration check for local random circuits ("Family B" in the "Building
-2-Designs" design notes): circuit 34 (Haar-reparametrized KAK1 blocks,
+"""Calibration check for local random circuits: circuit 34 (Haar-reparametrized KAK1 blocks,
 brickwork-tiled across N qubits, backed by two_designs/haar_reparam.py) and
 its ablation twin, circuit 33 (identical gate structure, raw angles used
 directly instead of Haar-reparametrized -- no correction at all).

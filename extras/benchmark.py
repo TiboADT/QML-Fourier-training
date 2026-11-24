@@ -46,46 +46,39 @@ def header(title):
     print(f"\n{'=' * 74}\n{title}\n{'=' * 74}")
  
  
-# ── 1. frame potential: einsum vs GEMM ─────────────────────────────────────
- 
+# ── 1. frame potential: pairwise traces (GEMM) ─────────────────────────────
+
 def bench_frame_potential(device):
-    header(f"1. Pairwise traces — einsum vs GEMM   [{device}]")
-    print(f"{'n_qubits':>9} {'N':>6} {'einsum':>10} {'GEMM':>10} {'speedup':>9} "
-          f"{'einsum peak':>12} {'GEMM peak':>10}")
- 
+    """Throughput of _estimate_from_batches's own pairwise-trace step (a
+    single GEMM -- see frame_potential.py). An einsum formulation was
+    benchmarked against this early on and dropped for being both slower
+    and higher-peak-memory; this only times what the code actually runs.
+    """
+    header(f"1. Pairwise traces — GEMM   [{device}]")
+    print(f"{'n_qubits':>9} {'N':>6} {'time':>10} {'peak mem':>10}")
+
     for n_qubits, N in [(4, 200), (6, 128), (6, 256), (8, 128)]:
         d = 2 ** n_qubits
         UA = torch.randn(N, d, d, dtype=torch.complex64, device=device)
         UB = torch.randn(N, d, d, dtype=torch.complex64, device=device)
- 
-        def with_einsum():
-            A, B = UA.unsqueeze(1), UB.unsqueeze(0)
-            return torch.einsum("bipq,bjpq->bij", A.conj(), B).squeeze(1)
- 
+
         def with_gemm():
             return UA.reshape(N, -1).conj() @ UB.reshape(N, -1).T
- 
+
         try:
-            t_ein = timeit(with_einsum)
+            t_gem = timeit(with_gemm)
         except RuntimeError as e:                       # OOM is itself the result
-            print(f"{n_qubits:>9} {N:>6} {'OOM':>10} "
-                  f"{timeit(with_gemm)*1000:>9.2f}ms {'-':>9}   ({str(e)[:30]})")
+            print(f"{n_qubits:>9} {N:>6} {'OOM':>10}   ({str(e)[:30]})")
             continue
-        t_gem = timeit(with_gemm)
- 
-        err = (with_einsum() - with_gemm()).abs().max().item()
-        peak_ein = N * N * d * d * 8 / 1e9
+
         peak_gem = (2 * N * d * d * 8 + N * N * 8) / 1e9
-        print(f"{n_qubits:>9} {N:>6} {t_ein*1000:>9.2f}ms {t_gem*1000:>9.2f}ms "
-              f"{t_ein/t_gem:>8.1f}x {peak_ein:>11.2f}GB {peak_gem:>9.3f}GB"
-              f"   (max|diff| {err:.1e})")
- 
+        print(f"{n_qubits:>9} {N:>6} {t_gem*1000:>9.2f}ms {peak_gem:>9.3f}GB")
+
     print("\nLargest N that fits an 8 GB budget at 6 qubits:")
     import math
     d, bpe, usable = 64, 8, 8e9 * 0.5
     a, b = bpe, 2 * d * d * bpe
-    print(f"  current  (N,N,d,d)      : N = {int(math.sqrt(usable / (d*d*bpe)))}")
-    print(f"  GEMM     (N,d^2) + (N,N): N = {int((-b + math.sqrt(b*b + 4*a*usable)) / (2*a))}")
+    print(f"  GEMM (N,d^2) + (N,N): N = {int((-b + math.sqrt(b*b + 4*a*usable)) / (2*a))}")
  
  
 def bench_sample_unitaries(device):
@@ -220,7 +213,7 @@ def bench_training_step(devices):
     for dev_name in devices:
         dev = torch.device(dev_name)
         try:
-            model, weights = build_model(get_architecture(18), 6, layers=3, anzats_reps=3, measuring_qubit=5)
+            model, weights = build_model(get_architecture(18), 6, layers=3, ansatz_reps=3, measuring_qubit=5)
         except Exception as e:
             print(f"  {dev_name}: build_model failed: {str(e)[:60]}")
             continue

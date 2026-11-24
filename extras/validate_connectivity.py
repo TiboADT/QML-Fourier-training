@@ -1,6 +1,5 @@
 """Calibration + comparison check for range-limited connectivity
-(extras/range_connectivity.py) -- "Family C" in the "Building
-2-Designs" design notes: same exact-Haar KAK1 block as circuit 34 in the
+(extras/range_connectivity.py): same exact-Haar KAK1 block as circuit 34 in the
 local-random check, same gate count, but each layer wires up a fresh
 random matching restricted to pairs at most `max_range` apart, instead of
 a fixed nearest-neighbour brickwork. max_range=1 is "local" in the same

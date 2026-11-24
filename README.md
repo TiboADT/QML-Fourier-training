@@ -64,7 +64,7 @@ x = torch.linspace(-torch.pi, torch.pi, 800)
 y = target(x)
 
 arch = get_architecture(7)  # or get_architecture(21110, generic=True) for a generic_ansatz code
-train_and_record(x, y, arch, n_qubits=6, layers=3, anzats_reps=1,
+train_and_record(x, y, arch, n_qubits=6, layers=3, ansatz_reps=1,
                   max_steps=600, path="results/")
 ```
 

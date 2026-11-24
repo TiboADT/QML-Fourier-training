@@ -1,5 +1,5 @@
 """Calibration check for the frame-potential estimator, using random
-Clifford circuits ("Family A" in the "Building 2-Designs" design notes).
+Clifford circuits.
 
 The Clifford group is an exact 3-design, so this is the one ensemble where
 the right answer is known in closed form: F^(t) = t! for t = 1, 2, 3, at
@@ -47,9 +47,9 @@ from two_designs.clifford_group import (
 
 
 def check_exact(n_qubits: int, ts=(1, 2, 3)):
-    """t! is only the exact Haar value of F^(t) for t <= d (Prop. 1/3 in the
-    design notes -- Schur-Weyl needs the t! permutation operators to stay
-    linearly independent, which fails past t = d). t values above d = 2**n_qubits
+    """t! is only the exact Haar value of F^(t) for t <= d -- Schur-Weyl
+    duality needs the t! permutation operators to stay linearly
+    independent, which fails past t = d. t values above d = 2**n_qubits
     are skipped rather than flagged, not silently passed."""
     d = 2 ** n_qubits
     order = clifford_group_order(n_qubits)

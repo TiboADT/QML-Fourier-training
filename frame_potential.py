@@ -152,12 +152,44 @@ def _is_oom(exc: RuntimeError) -> bool:
     return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
 
 
+def _estimate_once_with_batch_size(sampler: Sampler, d: int, t: int, n_samples: int, *,
+                                    device: Optional[torch.device] = None,
+                                    dtype: torch.dtype = torch.complex64,
+                                    generator: Optional[torch.Generator] = None):
+    """Same backoff behavior as estimate_once_from_sampler, but also returns
+    the batch size `n` that actually succeeded -- exactly, not re-derived
+    from Estimate.n_pairs via round(2*sqrt(n_pairs)) (an approximation,
+    only exact for even n). estimate_until_converged_from_sampler needs
+    this to clamp its own doubling after a backoff; every other caller
+    goes through estimate_once_from_sampler below, which just discards it.
+    """
+    if device is None:
+        device = get_device()
+    n = n_samples
+    while True:
+        n_a = n // 2
+        n_b = n - n_a
+        try:
+            UA = sampler(n_a, device=device, dtype=dtype, generator=generator)
+            UB = sampler(n_b, device=device, dtype=dtype, generator=generator)
+            return _estimate_from_batches(UA, UB, t, d), n
+        except RuntimeError as e:
+            if not _is_oom(e) or n <= 4:
+                raise
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            n_next = max(4, n // 2)
+            print(f"  [frame_potential] OOM at n_samples={n} (device={device}) -- "
+                  f"retrying at {n_next}")
+            n = n_next
+
+
 def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int, *,
                                 device: Optional[torch.device] = None,
                                 dtype: torch.dtype = torch.complex64,
                                 generator: Optional[torch.Generator] = None) -> Estimate:
     """Draw n_samples unitaries from `sampler` (split into two independent
-    halves A, B) and estimate F^(t) from all n_a * n_b cross pairs. 
+    halves A, B) and estimate F^(t) from all n_a * n_b cross pairs.
     `d` is the Hilbert space dimension the sampler produces (needed for
     Estimate.d / Estimate.haar, not inferrable from the sampler itself).
 
@@ -175,25 +207,9 @@ def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int,
     which just sees a smaller-than-requested batch and keeps looping) don't
     need to know this happened.
     """
-    if device is None:
-        device = get_device()
-    n = n_samples
-    while True:
-        n_a = n // 2
-        n_b = n - n_a
-        try:
-            UA = sampler(n_a, device=device, dtype=dtype, generator=generator)
-            UB = sampler(n_b, device=device, dtype=dtype, generator=generator)
-            return _estimate_from_batches(UA, UB, t, d)
-        except RuntimeError as e:
-            if not _is_oom(e) or n <= 4:
-                raise
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
-            n_next = max(4, n // 2)
-            print(f"  [frame_potential] OOM at n_samples={n} (device={device}) -- "
-                  f"retrying at {n_next}")
-            n = n_next
+    est, _ = _estimate_once_with_batch_size(sampler, d, t, n_samples, device=device,
+                                             dtype=dtype, generator=generator)
+    return est
 
 
 def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
@@ -220,15 +236,13 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
                                                  # large-d first call can ask for far more than
                                                  # fits (this was the actual OOM cause -- see
                                                  # _estimate_from_batches's docstring for the rest)
-    est = estimate_once_from_sampler(sampler, d, t, n_samples,
-                                      device=device, dtype=dtype, generator=generator)
-    # estimate_once_from_sampler backs off silently on OOM, so what it actually
-    # used can be smaller than what was asked for -- n_pairs = n_a*n_b with
-    # n_a ~= n_b ~= n/2 gives n ~= 2*sqrt(n_pairs). If it backed off, treat that
-    # as the new ceiling instead of max_batch_size, or every doubling below
+    est, achieved = _estimate_once_with_batch_size(sampler, d, t, n_samples,
+                                                    device=device, dtype=dtype, generator=generator)
+    # estimate_once backs off silently on OOM, so what it actually used can
+    # be smaller than what was asked for. If it backed off, treat that as
+    # the new ceiling instead of max_batch_size, or every doubling below
     # would re-discover the exact same OOM (and pay its own backoff sub-loop)
     # from scratch every single iteration.
-    achieved = int(round(2 * math.sqrt(est.n_pairs)))
     if achieved < n_samples:
         max_batch_size = min(max_batch_size, achieved)
         n_samples = achieved
@@ -241,9 +255,9 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
             print(f"  batch {i}: F={est.frame_potential:.4f} error={est.fidelity_error:.4f} "
                   f"target={target:.4f} n_pairs={est.n_pairs}")
         n_samples = min(n_samples * 2, max_batch_size)
-        new_est = estimate_once_from_sampler(sampler, d, t, n_samples,
-                                              device=device, dtype=dtype, generator=generator)
-        achieved = int(round(2 * math.sqrt(new_est.n_pairs)))
+        new_est, achieved = _estimate_once_with_batch_size(sampler, d, t, n_samples,
+                                                             device=device, dtype=dtype,
+                                                             generator=generator)
         if achieved < n_samples:
             max_batch_size = min(max_batch_size, achieved)
             n_samples = achieved

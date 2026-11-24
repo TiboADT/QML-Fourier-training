@@ -1,6 +1,5 @@
+import numpy as np
 import pennylane as qp
-from pennylane import numpy as np
-import matplotlib.pyplot as plt
 
 import torch
 
@@ -9,30 +8,20 @@ from architectures import Architecture
 # ── Training and cost functions ───────────────────────────────────────────────
 
 def square_loss(targets, predictions):
-    loss = 0
-    for t, p in zip(targets, predictions):
-        loss += (t - p) ** 2
-    loss = loss / len(targets)
-    return 0.5 * loss
-
-
-def cost_model(model):
-    def cost(weights, x, y):
-        predictions = model(weights, x)
-        return square_loss(y, predictions)
-    return cost
+    # same quantity as the loop-over-pairs version this replaced; only
+    # last-digit float rounding differs.
+    return 0.5 * ((targets - predictions) ** 2).mean()
 
 
 def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step=10, display=True):
     """`model` (from build_model) """
     weights = weights.detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([weights], lr = 0.1)
-    cost = cost_model(model)
     cst = torch.zeros(max_steps, dtype=torch.float32)
 
     def closure():
         opt.zero_grad()
-        loss = cost(weights, x_batch, y_batch)
+        loss = square_loss(y_batch, model(weights, x_batch))
         loss.backward()
         return loss
 
@@ -52,12 +41,12 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
     return weights.detach(), cst
 
 
-def build_model(arch: Architecture, n_qubits, layers, anzats_reps = 1, measuring_qubit = 0):
+def build_model(arch: Architecture, n_qubits, layers, ansatz_reps = 1, measuring_qubit = 0):
     """Build a model for the given architecture, number of qubits, and repetitions."""
 
     circuit_to_call = arch.build
 
-    weights_shape = arch.weight_shape(n_qubits, anzats_reps)
+    weights_shape = arch.weight_shape(n_qubits, ansatz_reps)
     weights_shape = (layers,) + weights_shape
     weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True)
 
@@ -96,6 +85,8 @@ def build_model(arch: Architecture, n_qubits, layers, anzats_reps = 1, measuring
 
 def show_results(model,weights, x, target_y, cst, title="Results"):
     """Helper function to visualize the results."""
+    import matplotlib.pyplot as plt
+
     predictions = model(weights, x)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))

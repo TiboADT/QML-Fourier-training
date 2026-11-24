@@ -19,11 +19,12 @@ COSTS_DIR       = "costs"
 EXPERIMENTS_FIELDS = [
     "id",
     "timestamp",
+    "git_commit",
     "circuit_num",
     "generic",
     "n_qubits",
     "layers",
-    "anzats_reps",
+    "ansatz_reps",
     "n_params",
     "n_train_samples",
     "max_steps",
@@ -31,17 +32,29 @@ EXPERIMENTS_FIELDS = [
     "n_expvals",
     "final_cost",
     "initial_cost",
+    "seed",
     "notes",
 ]
 
 
 def load_experiments(experiments_csv: str = EXPERIMENTS_CSV, path: str = None):
-    """Return all experiment summary rows as a list of dicts."""
+    """Return all experiment summary rows as a list of dicts.
+
+    Files written before the ansatz_reps/git_commit/seed rename+additions
+    have neither git_commit/seed nor the anzats_reps spelling -- rows from
+    those are normalized here (anzats_reps renamed in place; git_commit/
+    seed left absent rather than backfilled with a guess) so every caller
+    sees one consistent column name regardless of which file it came from.
+    """
     if path is not None:
         experiments_csv = os.path.join(path, experiments_csv)
     results_io.ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
     with open(experiments_csv, "r", newline="") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        if "anzats_reps" in row:
+            row["ansatz_reps"] = row.pop("anzats_reps")
+    return rows
 
 
 def save_cost_curve(experiment_id: str, costs, path: str = "results/") -> None:
@@ -89,7 +102,7 @@ class TrainingResult:
     generic: bool
     n_qubits: int
     layers: int
-    anzats_reps: int
+    ansatz_reps: int
     n_params: int
     n_train_samples: int
     max_steps: int
@@ -98,6 +111,7 @@ class TrainingResult:
     final_weights: "torch.Tensor"
     cst: "torch.Tensor"
     notes: str = ""
+    seed: "Optional[int]" = None
 
 
 def run_training(
@@ -106,12 +120,12 @@ def run_training(
     arch: Architecture,
     n_qubits: int,
     layers: int,
-    anzats_reps: int,
+    ansatz_reps: int,
     max_steps: int = 200,
     batch_size: int = 100,
     display_step: int = 10,
     notes: str = "",
-    train_fn = train,
+    seed: "Optional[int]" = None,
 ) -> TrainingResult:
     """Build the model and run `train` -- pure compute, no file I/O. Split
     out of train_and_record so the expensive part (this) can run in a
@@ -120,11 +134,16 @@ def run_training(
     the same experiments.csv from multiple OS processes aren't safe, so
     only ever call record_training from one process at a time against a
     given `path`. See run.py's `--n-workers` for the parallel caller.
+
+    `seed` is carried through to the recorded row only -- it is not used
+    here to seed anything (run.py's cmd_train seeds the global generator
+    once for the whole sweep before any run starts, see its own --seed
+    help), so every run recorded from one sweep shares the same value.
     """
-    model, weights = build_model(arch, n_qubits, layers, anzats_reps,
+    model, weights = build_model(arch, n_qubits, layers, ansatz_reps,
                                   measuring_qubit=n_qubits - 1)
 
-    final_weights, cst = train_fn(
+    final_weights, cst = train(
         model, weights, x, target_y,
         max_steps=max_steps,
         batch_size=batch_size,
@@ -137,11 +156,11 @@ def run_training(
         generic=arch.generic,
         n_qubits=n_qubits,
         layers=layers,
-        anzats_reps=anzats_reps,
+        ansatz_reps=ansatz_reps,
         # weight_tensor_shape allocates a rectangular tensor, but several
         # circuits don't read all of it — count what's
         # actually trainable rather than the raw tensor size.
-        n_params=layers * arch.n_trainable(n_qubits, anzats_reps),
+        n_params=layers * arch.n_trainable(n_qubits, ansatz_reps),
         n_train_samples=len(x),
         max_steps=max_steps,
         batch_size=batch_size,
@@ -151,6 +170,7 @@ def run_training(
         final_weights=final_weights,
         cst=cst,
         notes=notes,
+        seed=seed,
     )
 
 
@@ -178,11 +198,12 @@ def record_training(
     exp_row = {
         "id":               experiment_id,
         "timestamp":        timestamp,
+        "git_commit":       results_io.git_commit_hash(),
         "circuit_num":      result.circuit_num,
         "generic":          result.generic,
         "n_qubits":         result.n_qubits,
         "layers":           result.layers,
-        "anzats_reps":      result.anzats_reps,
+        "ansatz_reps":      result.ansatz_reps,
         "n_params":         result.n_params,
         "n_train_samples":  result.n_train_samples,
         "max_steps":        result.max_steps,
@@ -193,6 +214,7 @@ def record_training(
         # full-dataset evaluation.
         "initial_cost":     round(float(cst[0].item()), 8),
         "final_cost":       round(float(cst[-1].item()), 8),
+        "seed":             result.seed,
         "notes":            result.notes,
     }
     results_io.append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
@@ -214,14 +236,14 @@ def train_and_record(
     arch: Architecture,
     n_qubits: int,
     layers: int,
-    anzats_reps: int,
+    ansatz_reps: int,
     max_steps: int = 200,
     batch_size: int = 100,
     display_step: int = 10,
     notes: str = "",
     experiments_csv: str = EXPERIMENTS_CSV,
-    train_fn = train,
     path: str = "results/",
+    seed: "Optional[int]" = None,
 ):
     """
     Run `run_training` then `record_training` -- the single-call,
@@ -237,9 +259,9 @@ def train_and_record(
     cost_history : torch.Tensor  shape (max_steps,)
     """
     result = run_training(
-        x, target_y, arch, n_qubits, layers, anzats_reps,
+        x, target_y, arch, n_qubits, layers, ansatz_reps,
         max_steps=max_steps, batch_size=batch_size, display_step=display_step,
-        notes=notes, train_fn=train_fn,
+        notes=notes, seed=seed,
     )
     experiment_id = record_training(result, experiments_csv=experiments_csv, path=path)
     return experiment_id, result.final_weights, result.cst

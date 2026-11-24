@@ -44,16 +44,16 @@ Non-local part (3 of 15 parameters) — empirical Rosenblatt transform
 ----------------------------------------------------------------------
 The core circuit used here is (wires (c, t), applied as
 CNOT(c->t); RZ(tz) on t; RY(ty1) on c; CNOT(t->c); RY(ty2) on c; CNOT(c->t)):
-this is the standard 3-CNOT canonical-gate circuit, verified (see
-scratch/derive_core*.py in the design session) to give full-rank coverage
-of the 3-parameter Weyl chamber.
+this is the standard 3-CNOT canonical-gate circuit, verified numerically
+(via direct rank computation over sampled points) to give full-rank
+coverage of the 3-parameter Weyl chamber.
 
 The exact analytic Haar-pushforward density for (tz, ty1, ty2) involves a
 Weyl-integration-formula-type sine-product over an auxiliary eigenphase
-labelling that is genuinely fiddly to get right by hand (see the design
-notes: an initial closed-form derivation was numerically WRONG -- verified
-via round-trip frame-potential testing against known Haar values -- because
-of an unresolved sign/branch ambiguity in extracting those eigenphases).
+labelling that is genuinely fiddly to get right by hand -- an initial
+closed-form derivation attempted here was numerically WRONG (caught via
+round-trip frame-potential testing against known Haar values), because
+of an unresolved sign/branch ambiguity in extracting those eigenphases.
 
 Instead this module builds the reparametrization empirically and exactly:
     1. Draw N Haar-random SU(4) matrices the standard, trusted way

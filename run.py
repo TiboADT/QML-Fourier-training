@@ -191,7 +191,7 @@ def _common_parser():
                          "circuit_set numbers -- see generic_ansatz.py's module docstring")
     p.add_argument("--reps", type=int, nargs="+", default=None,
                     help="ansatz repetitions to sweep (default: 1 2 3; for train, "
-                         "this is per layer -- anzats_reps). Mutually exclusive "
+                         "this is per layer -- ansatz_reps). Mutually exclusive "
                          "with --max-params.")
     p.add_argument("--max-params", type=int, default=None,
                     help="instead of a fixed --reps list, sweep reps=1,2,3,... "
@@ -231,7 +231,7 @@ def _common_parser():
 
 # ── train ───────────────────────────────────────────────────────────────
 
-def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes):
+def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes, seed=None):
     """One (circuit, n_qubits, layers, reps) training run -- module-level
     and self-contained (imports its own dependencies) so it can be sent to
     a worker process by _parallel_map. Pure compute via run_training, no
@@ -256,8 +256,8 @@ def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes)
     from tracking import run_training
     t0 = _time.time()
     result = run_training(
-        x, y, arch, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
-        max_steps=max_steps, batch_size=batch_size, notes=notes,
+        x, y, arch, n_qubits=n_qubits, layers=layers, ansatz_reps=reps,
+        max_steps=max_steps, batch_size=batch_size, notes=notes, seed=seed,
     )
     # record_training (the only thing cmd_train does with the returned
     # result) never reads final_weights -- dropping it here
@@ -346,7 +346,7 @@ def cmd_train(args):
                 meta.append((degree, fn_i, n_qubits, layers, reps, num))
                 arch = get_architecture(num, generic=args.generic)
                 arg_tuples.append((x, y, arch, n_qubits, layers, reps,
-                                    args.max_steps, args.batch_size, args.notes))
+                                    args.max_steps, args.batch_size, args.notes, args.seed))
 
     t0 = time.time()
     n_failed = 0
@@ -455,11 +455,11 @@ def reps_for_param_budget(arch, n_qubits, max_params, multiplier=1):
     frame_potential.sample_unitaries, it's just circuit_set(num, reps)) and
     `layers` for training (build_model stacks `layers` independent copies
     of the same reps-parametrized block, each with its own weights -- see
-    experiment_tracker.py's n_params = layers * n_trainable(...) -- so the
+    tracking.py's n_params = layers * n_trainable(...) -- so the
     *total* trainable-parameter count a training run actually has is that
     product, not n_trainable alone).
 
-    Some generic_ansatz codes (topo_category=0 -- no entangling topology at
+    Some generic_ansatz codes (connectivity=0 -- no entangling topology at
     all, e.g. 20000) deliberately collapse to the same fixed-size single
     rotation layer for *every* reps (see generic_ansatz's module docstring),
     so n_trainable never grows and never exceeds max_params -- without the
