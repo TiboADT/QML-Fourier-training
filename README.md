@@ -32,6 +32,11 @@ compared to the Haar reference `F/F_Haar`).
   background runs" below.
 - `check.py` / `checks/`: CLI for one-off validation and benchmark scripts,
   as opposed to run.py's repeatable experiments — see "Checks" below.
+- `extras/`: not used in the paper (range-limited connectivity, its
+  validation check, and the timing benchmarks). Still reachable through
+  `check.py` (`show connectivity`, `validate --only connectivity`,
+  `benchmark`) -- moved here to keep the paper's own code path small,
+  not to remove the functionality.
 - `notebooks/`: `building_circuits.ipynb` (circuit sanity checks),
   `Fourier.ipynb`/`training_and_saving.ipynb` (training), `post_processing.ipynb`
   (loads both `results/experiments.csv` and `results/frame_potential.csv`,
@@ -254,10 +259,10 @@ regenerate with `python two_designs/haar_reparam.py --build [--n-samples N]`
 (needs `scipy`, offline only — not a runtime dependency). Calibration
 checks for circuit 34 — including an explicit check for the
 convergence-loop pitfall described under "Checks" below — live in
-`checks/validate_local_random.py`, run via `python check.py validate
+`extras/validate_local_random.py`, run via `python check.py validate
 --only local-random` (or the short alias `--only b`).
 
-`two_designs/range_connectivity.py`'s `draw_display_circuit` uses the same
+`extras/range_connectivity.py`'s `draw_display_circuit` uses the same
 two primitives directly, for a different reason than either circuit above:
 every gate there is independent, with no earlier gate's dressing to
 inherit, so it always builds a full, standalone (both-sides-dressed)
@@ -288,7 +293,7 @@ circuit_set-specific layer and a generic one underneath:
   `estimate_until_converged(num, n_qubits, reps, t, ...)` — unchanged
   signatures, now thin wrappers that build a `circuit_set`-backed sampler
   and delegate. Every existing call site (`run.py`, this README,
-  `checks/benchmark.py`) keeps working exactly as before.
+  `extras/benchmark.py`) keeps working exactly as before.
 
 **Random Clifford circuits** (`two_designs/clifford_group.py`) — not an
 ansatz, a calibration check. The Clifford group is an exact 3-design, so
@@ -327,7 +332,7 @@ sample size chasing noise. That's a real property of the relative-tolerance
 stopping rule, worth knowing about for any near-exact-design ensemble, not
 specific to Cliffords.
 
-**Range-limited connectivity** (`two_designs/range_connectivity.py`) —
+**Range-limited connectivity** (`extras/range_connectivity.py`) —
 same exact-Haar KAK1 block as circuit 34, same gate count, but each
 layer wires up a *fresh random* pairing of qubits instead of circuit 34's
 fixed nearest-neighbour brickwork, restricted to pairs at most `max_range`
@@ -373,7 +378,7 @@ reading a row across shows the gain from more reach at fixed depth — here,
 `range<=3` reaches at half the depth, `reps=4` (ratio 1.04), reproducing
 the design notes' claim that letting gates reach further matters as much
 as adding more of them at fixed gate count. Customize the sweep — it
-forwards extra arguments straight to `checks/validate_connectivity.py`'s
+forwards extra arguments straight to `extras/validate_connectivity.py`'s
 own `argparse` parser:
 
 ```bash
@@ -448,9 +453,9 @@ sample count instead — the right tool whenever you already expect
 to report.
 
 `check.py benchmark`/`check.py validate` forward their trailing arguments
-straight to `checks/benchmark.py`'s / `checks/validate.py`'s own `argparse`
+straight to `extras/benchmark.py`'s / `checks/validate.py`'s own `argparse`
 parsers, and `validate` forwards a second time when `--only` picks a
-specific check with flags of its own (`checks/validate_connectivity.py`'s
+specific check with flags of its own (`extras/validate_connectivity.py`'s
 `--n-qubits`/`--reps`/`--ranges`/etc., via `parse_known_args` — anything
 `--only` itself doesn't recognize is passed straight through). Add an
 entirely new top-level command (as opposed to a new ensemble under
@@ -467,7 +472,7 @@ anymore; go through `check.py` instead.
 
 **`check.py show`** (`checks/show.py`) answers "what circuit am I actually
 testing" directly, rather than requiring a read through `circuits.py` or
-`two_designs/range_connectivity.py`'s source. Two targets:
+`extras/range_connectivity.py`'s source. Two targets:
 
 ```bash
 python check.py show 34 --n-qubits 6 --reps 2                        # any circuit_set number
@@ -478,7 +483,7 @@ A `circuit_set` number (any of 1–36, retroactively — they're already built
 from real PennyLane operations, so `qml.draw` already knows how to render
 them) prints the weight-tensor shape plus the full ASCII gate diagram.
 `connectivity` is the one case that needs its own path:
-`two_designs/range_connectivity.py`'s fast sampler deliberately never
+`extras/range_connectivity.py`'s fast sampler deliberately never
 builds a PennyLane circuit at all (see "Range-limited connectivity" above
 — that retracing was the exact performance bug fixed last session), so
 there's no existing object to draw. `draw_display_circuit` is a second,

@@ -7,9 +7,9 @@ Three targets:
     encoding) -- pass --generic so `target` is decoded as a code instead
     of looked up as a circuit_set number
   - One concrete random realization of the range-connectivity ensemble
-    (two_designs/range_connectivity.py), which otherwise has no single
-    fixed circuit to look at -- its wiring is redrawn per sample by
-    design (see that module's docstring).
+    (extras/range_connectivity.py, not used by the paper), which otherwise
+    has no single fixed circuit to look at -- its wiring is redrawn per
+    sample by design (see that module's docstring).
 
     python check.py show 34 --n-qubits 6 --reps 2
     python check.py show 21121 --generic --n-qubits 6 --reps 2
@@ -26,7 +26,8 @@ one -- but this stays as a no-cost safety net for anything that adds one back.
 
 Pass --mpl to additionally save a Qiskit-style boxed diagram (matplotlib,
 one gate per box, no line-wrapping) to a PNG -- better than ASCII can ever
-be for a genuinely wide/dense circuit:
+be for a genuinely wide/dense circuit. Parameter values are omitted from
+these by default (pass --decimals N to show them):
 
     python check.py show 34 --n-qubits 6 --reps 2 --mpl
     python check.py show 34 --n-qubits 6 --reps 2 --mpl my_circuit.png
@@ -44,7 +45,7 @@ import pennylane as qp
 import torch
 
 from circuits import circuit_set, weight_tensor_shape
-from two_designs.range_connectivity import draw_display_circuit
+from extras.range_connectivity import draw_display_circuit
 
 # Purely-cosmetic ops to drop from the *diagram* only (never from the
 # circuit actually being measured/estimated elsewhere) -- see module
@@ -73,25 +74,30 @@ def _terminal_width(margin=2):
     return max(60, shutil.get_terminal_size(fallback=(100, 24)).columns - margin)
 
 
-def _show(tape, title: str, mpl_path):
+def _show(tape, title: str, mpl_path, decimals=None):
     print(title)
     print(qp.drawer.tape_text(tape, max_length=_terminal_width(), decimals=2))
     if mpl_path:
-        fig, _ = qp.drawer.tape_mpl(tape, decimals=2)
+        # decimals=None is tape_mpl's own default -- it omits parameter
+        # values from gate labels entirely (vs. the text diagram above,
+        # which always shows them -- that one's for quick terminal
+        # inspection, this one's for paper/presentation figures, where
+        # specific angle values are usually noise, not information).
+        fig, _ = qp.drawer.tape_mpl(tape, decimals=decimals)
         fig.savefig(mpl_path, dpi=150, bbox_inches="tight")
         print(f"\n(mpl diagram saved to {mpl_path})")
 
 
-def show_circuit_set(num: int, n_qubits: int, reps: int, mpl_path, generic: bool = False):
+def show_circuit_set(num: int, n_qubits: int, reps: int, mpl_path, generic: bool = False, decimals=None):
     shape = weight_tensor_shape(num, n_qubits, reps, generic=generic)
     weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64)
     tape = _build_tape(lambda: circuit_set(num=num, generic=generic)(weights, wires=list(range(n_qubits))))
     label = "generic_ansatz" if generic else "circuit_set"
     title = f"{label}({num}), n_qubits={n_qubits}, reps={reps}, weight shape={tuple(shape)}\n"
-    _show(tape, title, mpl_path)
+    _show(tape, title, mpl_path, decimals=decimals)
 
 
-def show_connectivity(n_qubits: int, reps: int, max_range: int, seed, mpl_path):
+def show_connectivity(n_qubits: int, reps: int, max_range: int, seed, mpl_path, decimals=None):
     circuit_fn, wiring = draw_display_circuit(n_qubits, reps, max_range, seed=seed)
 
     seed_note = f"seed={seed}" if seed is not None else "unseeded -- a fresh random instance each run"
@@ -105,7 +111,7 @@ def show_connectivity(n_qubits: int, reps: int, max_range: int, seed, mpl_path):
     print()
 
     tape = _build_tape(circuit_fn)
-    _show(tape, "gate diagram:", mpl_path)
+    _show(tape, "gate diagram:", mpl_path, decimals=decimals)
 
 
 def main(argv=None):
@@ -125,19 +131,26 @@ def main(argv=None):
     p.add_argument("--mpl", nargs="?", const=True, default=None, metavar="PATH",
                     help="also save a matplotlib (boxed, Qiskit-style) diagram -- "
                          "to PATH if given, else circuit_<target>.png")
+    p.add_argument("--decimals", type=int, default=None,
+                    help="mpl diagram only: decimal places for parameter values on gate "
+                         "labels. Default omits parameters entirely (paper/presentation "
+                         "figures don't usually want specific angle values); pass e.g. "
+                         "--decimals 2 to show them, for debugging a specific circuit.")
     args = p.parse_args(argv)
 
     mpl_path = f"results/circuit_{args.target}.png" if args.mpl is True else args.mpl
 
     if args.target in ("connectivity", "c", "range-connectivity"):
-        show_connectivity(args.n_qubits, args.reps, args.max_range, args.seed, mpl_path)
+        show_connectivity(args.n_qubits, args.reps, args.max_range, args.seed, mpl_path,
+                           decimals=args.decimals)
         return
 
     try:
         num = int(args.target)
     except ValueError:
         raise SystemExit(f"'{args.target}' is neither a circuit_set number nor 'connectivity'.")
-    show_circuit_set(num, args.n_qubits, args.reps, mpl_path, generic=args.generic)
+    show_circuit_set(num, args.n_qubits, args.reps, mpl_path, generic=args.generic,
+                      decimals=args.decimals)
 
 
 if __name__ == "__main__":

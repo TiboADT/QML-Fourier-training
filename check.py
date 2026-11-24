@@ -1,8 +1,9 @@
 """
 Single CLI entry point for the repo's validation/benchmark scripts, which
-live in checks/ (kept separate from the library code in circuits.py,
-frame_potential.py, two_designs/, etc. -- checks/ is things you *run*, the
-rest is things you *import*).
+live in checks/ (used by the paper) and extras/ (not used by the paper --
+benchmark.py, and two of the three validate checks) -- kept separate from
+the library code in circuits.py, frame_potential.py, two_designs/, etc.
+(checks/extras is things you *run*, the rest is things you *import*).
 
 Examples
 --------
@@ -33,7 +34,7 @@ def main():
     args = p.parse_args()
 
     if args.command == "benchmark":
-        from checks.benchmark import main as benchmark_main
+        from extras.benchmark import main as benchmark_main
         benchmark_main(args.rest)
     elif args.command == "validate":
         from checks.validate import main as validate_main

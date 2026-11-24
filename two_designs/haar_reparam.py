@@ -198,7 +198,7 @@ def euler_angles(u_alpha: torch.Tensor, u_beta: torch.Tensor, u_gamma: torch.Ten
 # applied to a big batch (frame_potential.sample_unitaries's whole design,
 # behind circuit_set(33)/(34)). It is the wrong thing when a caller needs
 # MANY small, differently-wired constructions -- e.g.
-# two_designs/range_connectivity.py, which draws a fresh 2-qubit gate
+# extras/range_connectivity.py, which draws a fresh 2-qubit gate
 # embedding per wire pair per layer per wiring instance: retracing
 # circuits.py's PennyLane queue on every one of those calls turned out to
 # dominate runtime completely (a few thousand retraces of a tiny circuit
@@ -257,7 +257,7 @@ _CNOT_Q1Q0 = torch.tensor([[1, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [0, 1, 0, 0
 def kak1_block_matrix(raw15: torch.Tensor) -> torch.Tensor:
     """raw15: (15, B) tensor, entries Uniform(0, 2*pi) -- one full, standalone
     KAK1 block: [0:3]=A1, [3:6]=A0, [6:9]=canonical, [9:12]=B1, [12:15]=B0,
-    same convention two_designs/range_connectivity.py's draw_display_circuit
+    same convention extras/range_connectivity.py's draw_display_circuit
     builds per gate (every gate there is independent, nothing to inherit a
     dressing from -- unlike circuit_set(33)/(34), which only use this full
     form for a wire's first touch and a truncated 9-parameter form after).

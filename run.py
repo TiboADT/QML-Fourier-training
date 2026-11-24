@@ -480,7 +480,7 @@ def _converged(est, rel_tol, min_abs_error=1e-5):
     """Re-derive whether estimate_until_converged's own stopping criterion
     was actually satisfied -- it returns only the final (possibly
     max_batches-exhausted) Estimate, not a flag saying which happened.
-    Same formula as checks/validate_local_random.py's
+    Same formula as extras/validate_local_random.py's
     check_convergence_pathology; min_abs_error matches
     estimate_until_converged's own default since run.py doesn't expose
     that one as a flag."""
