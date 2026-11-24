@@ -1,8 +1,8 @@
 """Shared CSV-append infrastructure for frame_potential.py and
-experiment_tracker.py: both append one row per run to a CSV, creating it
+tracking.py: both append one row per run to a CSV, creating it
 with a header if missing, and both need the commit that produced a row
 traceable later. Previously duplicated -- frame_potential.save_estimate
-had its own inline writer, experiment_tracker.py its own
+had its own inline writer, tracking.py its own
 _ensure_csv/_append_row, doing the exact same thing -- unified here, with
 a header-mismatch check added (code review, "must fix": local CSVs were
 found column-shifted after fields were added to a field list but not to

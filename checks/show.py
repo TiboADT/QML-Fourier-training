@@ -44,6 +44,7 @@ import shutil
 import pennylane as qp
 import torch
 
+import generic_ansatz
 from architectures import get_architecture
 from extras.range_connectivity import draw_display_circuit
 
@@ -93,7 +94,11 @@ def show_circuit_set(num: int, n_qubits: int, reps: int, mpl_path, generic: bool
     shape = arch.weight_shape(n_qubits, reps)
     weights = 2 * torch.pi * torch.rand(shape, dtype=torch.float64)
     tape = _build_tape(lambda: arch.build(weights, wires=list(range(n_qubits))))
-    title = f"{arch.label}, n_qubits={n_qubits}, reps={reps}, weight shape={tuple(shape)}\n"
+    label = arch.label
+    if generic:
+        readable = generic_ansatz.architecture_label(generic_ansatz.get_architecture_from_code(num))
+        label = f"{label} ({readable})"
+    title = f"{label}, n_qubits={n_qubits}, reps={reps}, weight shape={tuple(shape)}\n"
     _show(tape, title, mpl_path, decimals=decimals)
 
 

@@ -2,7 +2,7 @@
 generic_ansatz code) with whether it's generic, so every function that
 needs to build/size a circuit takes one argument instead of a hand-passed
 (num, generic) pair threaded through separately. Previously repeated
-across run.py, frame_potential.py, experiment_tracker.py, functions.py,
+across run.py, frame_potential.py, tracking.py, training.py,
 and checks/show.py (code review, "proposed organisation" -> "one
 architecture interface").
 """
