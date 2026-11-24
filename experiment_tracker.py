@@ -6,6 +6,7 @@ from datetime import datetime
 
 import numpy as np
 
+import results_io
 from functions import train, build_model
 from circuits import n_trainable
 
@@ -34,27 +35,11 @@ EXPERIMENTS_FIELDS = [
 ]
 
 
-def _ensure_csv(path: str, fieldnames: list[str]) -> None:
-    """Create the CSV with a header row if it does not exist yet."""
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    if not os.path.exists(path):
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-def _append_row(path: str, fieldnames: list[str], row: dict) -> None:
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writerow(row)
-
-
 def load_experiments(experiments_csv: str = EXPERIMENTS_CSV, path: str = None):
     """Return all experiment summary rows as a list of dicts."""
     if path is not None:
         experiments_csv = os.path.join(path, experiments_csv)
-    _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
+    results_io.ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
     with open(experiments_csv, "r", newline="") as f:
         return list(csv.DictReader(f))
 
@@ -187,8 +172,6 @@ def record_training(
     """
     experiments_csv = experiments_csv if path is None else os.path.join(path, experiments_csv)
 
-    _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
-
     experiment_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat(timespec="seconds")
     cst = result.cst
@@ -213,7 +196,7 @@ def record_training(
         "final_cost":       round(float(cst[-1].item()), 8),
         "notes":            result.notes,
     }
-    _append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
+    results_io.append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
 
     # cst holds every one of the max_steps optimizer steps' own batch loss --
     # no separate pre-training slot to skip any more (see train()'s docstring).

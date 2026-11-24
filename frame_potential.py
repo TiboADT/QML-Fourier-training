@@ -35,19 +35,17 @@ full-tensor passes. Everything is plain torch ops, so it runs on GPU for
 free by passing device=torch.device("cuda").
 """
 
-import csv
 import math
 import os
-import subprocess
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Callable, Optional
 
 import torch
 import pennylane as qp
 
+import results_io
 from circuits import circuit_set, weight_tensor_shape, n_trainable
 
 
@@ -460,19 +458,6 @@ FRAME_POTENTIAL_FIELDS = [
 ]
 
 
-def _git_commit_hash() -> str:
-    """So a saved row can always be traced back to the code that produced
-    it -- "unknown" outside a git repo or with no commits."""
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
-
-
 def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
                    device, dtype, seed: Optional[int] = None, notes: str = "",
                    path: str = FRAME_POTENTIAL_CSV, generic: bool = False) -> str:
@@ -483,7 +468,7 @@ def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
     row = {
         "id": row_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "git_commit": _git_commit_hash(),
+        "git_commit": results_io.git_commit_hash(),
         "circuit_num": circuit_num,
         "generic": generic,
         "n_qubits": n_qubits,
@@ -503,15 +488,7 @@ def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
         "seed": seed if seed is not None else "",
         "notes": notes,
     }
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    file_exists = os.path.exists(path)
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FRAME_POTENTIAL_FIELDS)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+    results_io.append_row(path, FRAME_POTENTIAL_FIELDS, row)
     return row_id
 
 
