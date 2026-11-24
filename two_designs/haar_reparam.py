@@ -203,13 +203,15 @@ def euler_angles(u_alpha: torch.Tensor, u_beta: torch.Tensor, u_gamma: torch.Ten
 # circuits.py's PennyLane queue on every one of those calls turned out to
 # dominate runtime completely (a few thousand retraces of a tiny circuit
 # costs far more than the circuit itself). kak1_block_matrix below is the
-# same math -- same gate sequence, same GlobalPhase(-pi/4) det correction
-# -- reimplemented as direct batched torch matrix construction, with no
-# PennyLane tracing at all. Verified to agree with
-# frame_potential.sample_unitaries(33, ...) (which goes through circuits.py
-# and PennyLane) to machine precision -- see
-# two_designs/range_connectivity.py's module docstring / the design
-# session's own checks for how.
+# same gate sequence, reimplemented as direct batched torch matrix
+# construction with no PennyLane tracing at all -- except for one
+# deliberate divergence: it applies an extra e^(i*pi/4) global phase to
+# the canonical core that circuits.py's core_kak does not (confirmed:
+# without that factor the two match to machine precision; with it, they
+# differ by exactly that phase). Frame potential only ever reads
+# |Tr(U_i^dag U_j)|, which is invariant to a global phase on either
+# factor, so this has no effect on any result -- but the two functions do
+# not produce identical matrices, only identical frame-potential statistics.
 
 def _rz_matrix(theta: torch.Tensor) -> torch.Tensor:
     """theta: (...,) real -> (..., 2, 2) complex128."""

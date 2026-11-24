@@ -272,7 +272,6 @@ def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -
                      n_pairs=n_a * n_b, t=t, d=d)
 
 
-
 Sampler = Callable[..., torch.Tensor]
 """
 A `Sampler` is any callable (batch_size, *, device, dtype, generator) ->
@@ -463,7 +462,7 @@ FRAME_POTENTIAL_FIELDS = [
 
 def _git_commit_hash() -> str:
     """So a saved row can always be traced back to the code that produced
-    it (code review §1.5) — "unknown" outside a git repo or with no commits."""
+    it -- "unknown" outside a git repo or with no commits."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],

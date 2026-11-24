@@ -38,19 +38,7 @@ A 5-digit decimal code, read most- to least-significant digit:
                   useless as an "entangler" here, and nothing in this
                   codebase ever used it)
     parametrized: 0=CRX, 1=CRY, 2=CRZ             (3-9 reserved)
-                  wires=[w1, w0] (control=w1, target=w0) -- matches
-                  circuits.py's circuits 4/6/8/14/17/19, which now use
-                  CRX directly instead of the Hadamard-ControlledPhaseShift-
-                  Hadamard sandwich those used to be written as (that
-                  sandwich is closely related to CRX, not identical to it:
-                  H.CP(theta).H == CRX(theta) . PhaseShift(theta/2,
-                  control) -- using CRX directly here is a deliberate
-                  simplification, not a reproduction of the old sandwich).
-                  No ControlledPhaseShift option: circuits.py's former CP
-                  circuits (3/5/7/13/16/18) now use CRZ directly for the
-                  same reason (CP(theta) == CRZ(theta) . PhaseShift(theta/2,
-                  control) -- closely related, not identical), so CP
-                  itself appears nowhere in this codebase any more.
+                  wires=[w1, w0] (control=w1, target=w0)
 
 Deliberately out of scope here (per design discussion): composite/KAK-style
 entanglers, and range-limited connectivity (needs an actual int parameter,
@@ -229,8 +217,10 @@ def _apply_rotation(spec: GenericSpec, params_row, wire):
 
 def _apply_entangler(spec: GenericSpec, param, wires, swap_for_parametrized: bool):
     """wires = [w0, w1] in exactly the order entangling_pairs returned the
-    pair. A fixed gate always reads it directly as [control, target]
-    """
+    pair. A fixed gate always reads it directly as [control, target].
+    A parametrized gate reads [w1, w0] (control=w1, target=w0) when
+    swap_for_parametrized is True; build()'s one exception is circular-
+    sequential's backward pass, which passes False to keep [w0, w1]."""
     w0, w1 = wires
     if spec.gate_category == 0:
         return
@@ -254,6 +244,13 @@ def _layer_cost(spec: GenericSpec, num_wires: int, rep: int) -> int:
 
 def weight_tensor_shape(code: int, num_wires: int, reps: int = 1) -> tuple:
     """params shape: (reps + 1, num_wires, width)
+
+    For all-to-all topology, width's entangler_cols = num_wires - 1: each
+    wire w0 is the first element of exactly num_wires - 1 ordered pairs
+    (one per other wire -- see entangling_pairs's topo_category == 2
+    branch), so build()'s per-wire cp_idx_by_wire counter cycles through
+    exactly 0..num_wires-2 for that wire: one write per allocated column,
+    no collision and nothing left unused.
     """
     spec = decode(code)
     if spec.topo_category == 0:
@@ -285,8 +282,8 @@ def build(code: int, params, wires=None):
         swap = not (spec.topo_structure == 3 and rep % 2 == 1)
         # each pair's parameter lives at its first wire's entangler
         # column(s) -- cp_idx_by_wire counts up per wire so all-to-all's
-        # num_wires-1 pairs per wire land on distinct columns (weight_
-        # tensor_shape's docstring has the no-collision argument/check).
+        # num_wires-1 pairs per wire land on distinct columns (see
+        # weight_tensor_shape's docstring for the no-collision argument).
         cp_idx_by_wire = {}
         for (w0, w1) in pairs:
             cp_idx = cp_idx_by_wire.get(w0, 0)

@@ -26,22 +26,11 @@ def two_rotations(params, wires = None):
         qp.RY(params[i, 0], wires=wires[i])
         qp.RX(params[i, 1], wires=wires[i])
 
-def CNOT_cascade(wires , circular = False, ascending = False):
-    """ 
-    wires : list of wires to apply the CNOT cascade on
-    circular : if True, apply a CNOT from the last wire to the first wire
-    ascending : if True, apply the CNOTs in ascending order, else in descending order
-    """
-    if ascending:
-        for i in range(len(wires) - 1):
-            qp.CNOT(wires=[wires[i], wires[i + 1]])
-        if circular:
-            qp.CNOT(wires=[wires[-1], wires[0]])
-    else:
-        for i in range(len(wires) - 1, 0, -1):
-            qp.CNOT(wires=[wires[i], wires[i - 1]])
-        if circular:
-            qp.CNOT(wires=[wires[0], wires[-1]])
+def CNOT_cascade(wires):
+    """Apply a cascading CNOT chain in ascending order: (wires[0],wires[1]),
+    (wires[1],wires[2]), ..."""
+    for i in range(len(wires) - 1):
+        qp.CNOT(wires=[wires[i], wires[i + 1]])
 
 
 def rx_rz_layer(params, wires):
@@ -98,8 +87,8 @@ def _brickwork_layer_pairs(num_wires: int, layer: int) -> int:
     return num_pairs - layer % 2 * wires_parity
 
 
-def circuit_set(name: str = None, num: int = None, generic: bool = False):
-    """Return a function corresponding to the named or numbered circuit.
+def circuit_set(num: int = None, generic: bool = False):
+    """Return a function corresponding to the numbered circuit.
 
     Circuits 1–19 are direct translations of the Qiskit circuit_set circuits.
 
@@ -115,18 +104,8 @@ def circuit_set(name: str = None, num: int = None, generic: bool = False):
 
         return generic_circuit
 
-    circuit_names = {
-        "Brickwall": 32,
-        "StronglyEntangling": 30,
-        "KAK": 33,
-        "KAK_Haar": 34,
-    }
-    # extend as needed
-
     if num is None:
-        if name is None:
-            raise ValueError("You must provide either a circuit name or a circuit number.")
-        num = circuit_names[name]
+        raise ValueError("You must provide a circuit number.")
 
     # ------------------------------------------------------------------
     # Circuit 1: RX-RZ layers, no entanglement
@@ -153,14 +132,14 @@ def circuit_set(name: str = None, num: int = None, generic: bool = False):
                 wires = list(range(num_wires))
             for i in range(reps):
                 rx_rz_layer(params[i], wires)
-                CNOT_cascade(wires, ascending=True)
+                CNOT_cascade(wires)
 
         return circ2
 
     # ------------------------------------------------------------------
     # Circuit 3: RX-RZ + CRZ chain
-    # params shape: (reps, num_wires, 2) for rotations + (reps, num_wires-1) for CRZ angles
-    # Packed as params shape: (reps, 2*num_wires + (num_wires-1))
+    # params shape: (reps, num_wires, 3)
+    #   [:, :, :2] = RX/RZ angles, [:, :num_wires-1, 2] = CRZ angles
     # ------------------------------------------------------------------
     elif num == 3:
         def circ3(params, wires=None):
@@ -247,14 +226,11 @@ def circuit_set(name: str = None, num: int = None, generic: bool = False):
 
     # ------------------------------------------------------------------
     # Circuit 7: RX-RZ, staggered CRZ (even pairs then odd pairs), RX-RZ
-    # params shape: (reps, num_wires, 2) + stagger CRZ angles
-    # Packed: (reps, 4*num_wires + num_wires//2 + (num_wires-1)//2)
-    # Simplified: params shape (reps, num_wires, 5)
-    #   params[:, :, 0:2]              = first RX-RZ
-    #   params[:, :num_wires//2, 5]    = even-pair CRZ angles
-    #   params[:, :, 2:4]              = second RX-RZ
-    #   params[:, :(num_wires-1)//2, 5]= odd-pair CRZ angles   (in separate tensor below)
-    # For simplicity we split into separate param tensors matching the Qiskit structure.
+    # params shape: (reps, num_wires, 6)
+    #   [:, :, 0:2]                 = first RX-RZ
+    #   [:, :num_wires//2, 4]       = even-pair CRZ angles
+    #   [:, :, 2:4]                 = second RX-RZ
+    #   [:, :(num_wires-1)//2, 5]   = odd-pair CRZ angles
     # ------------------------------------------------------------------
     elif num == 7:
         def circ7(params, wires=None):
@@ -453,10 +429,11 @@ def circuit_set(name: str = None, num: int = None, generic: bool = False):
         return circ15
 
     # ------------------------------------------------------------------
-    # Circuit 16: RX-RZ + staggered CRZ sharing the same angle set
-    # (even then odd pairs reuse the same param array — matches Qiskit bug/feature)
+    # Circuit 16: RX-RZ + staggered CRZ (even pairs then odd pairs)
     # params shape: (reps, num_wires, 3)
-    #   [:, :, :2] = RX-RZ, [:, :num_wires-1, 2] = CRZ angles (shared even/odd)
+    #   [:, :, :2] = RX-RZ, [:, q, 2] = CRZ angle for the pair starting at
+    #   wire q (even q -> even pairs, odd q -> odd pairs -- same column,
+    #   distinct q rows, so no two pairs actually read the same entry)
     # ------------------------------------------------------------------
     elif num == 16:
         def circ16(params, wires=None):
