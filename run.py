@@ -55,72 +55,45 @@ from architectures import get_architecture
 torch.multiprocessing.set_sharing_strategy("file_system")
 
 
-def _parallel_map(fn, arg_tuples, n_workers):
+_SKIPPED = object()  # sentinel distinct from any real result or Exception
+
+
+def _parallel_map(fn, arg_tuples, n_workers, skip_if=None):
     """Apply fn(*args) for each args in arg_tuples, yielding (original_index,
-    result) pairs as they complete -- not necessarily in submission order,
-    since that's the point of running them concurrently (see
-    concurrent.futures.as_completed). n_workers <= 1 runs sequentially in
-    this process instead (no process-pool overhead, and exactly today's
-    single-worker behavior/output ordering).
+    result) pairs as they complete (not necessarily in submission order --
+    see concurrent.futures.as_completed). n_workers <= 1 runs sequentially
+    in this process instead (today's single-worker behavior/ordering, no
+    pool overhead).
 
-    Processes, not threads: Python's GIL means only one thread executes
-    Python bytecode at a time, and this project's per-circuit work is
-    dominated by Python-level overhead (building up a gate-by-gate tape,
-    looping over wires) rather than large tensor math, so threads wouldn't
-    actually run concurrently here. Separate OS processes are what
-    sidesteps the GIL for CPU-bound work like this.
+    Key decisions, not just today's behavior (see git history for the
+    debugging story behind each): processes, not threads, since the GIL
+    would serialize this project's Python-heavy per-circuit work anyway;
+    'spawn', not 'fork', because fork()-ing a process that already holds
+    PyTorch's internal OpenMP/MKL lock deadlocks every worker identically;
+    each worker's own BLAS/OpenMP thread pool is forced to 1 thread (set as
+    an env var in THIS process before the pool is created -- too late once
+    a spawned worker has already imported torch), so n_workers independent
+    single-threaded processes are the whole source of parallelism, not
+    n_workers processes each also trying to multi-thread on top of it; one
+    task raising is yielded as that exception in place of a result (callers
+    check `isinstance(result, Exception)`) rather than aborting the whole
+    sweep, since every other task's result is independent and worth keeping.
 
-    `fn` must be a module-level function (not a local closure or lambda --
-    those aren't reliably picklable for sending to a worker process), and
-    every item in arg_tuples must itself be picklable (plain tensors/numbers
-    are fine).
+    `fn` must be a module-level function (not a local closure/lambda --
+    unpicklable), and every item in arg_tuples must itself be picklable.
 
-    One task raising is not fatal to the rest of the sweep: its exception is
-    yielded in place of a result (callers check `isinstance(result,
-    Exception)`) so the caller can report it and move on. Before this, one
-    bad task (a transient CUDA OOM, say) propagated out of future.result()
-    uncaught, which aborted the whole loop immediately -- discovered the
-    hard way on a long --max-params sweep where that meant losing every
-    other task's output too, including ones that had already finished:
-    record_training (which creates the CSV in the first place) never got a
-    chance to run for *anything*.
-
-    Workers start via 'spawn' (a fresh Python interpreter each), not
-    ProcessPoolExecutor's platform default ('fork' on Linux). fork()-ing a
-    process that has already imported/used torch is a documented deadlock
-    hazard: PyTorch's own internal thread pool (OpenMP/MKL) may be holding
-    a lock at the instant of the fork, and the child inherits the *memory*
-    of that lock being held but not the thread that would ever release it
-    -- so the first thing any worker does that needs it blocks forever.
-    Every worker hits this identically (confirmed live: all workers alive,
-    0% CPU, the same few hundred ms of startup time each, no error, no
-    crash, no progress -- not a resource limit or a slow start). spawn
-    avoids this entirely at the cost of slower worker startup (each
-    re-imports torch/pennylane from scratch -- seconds, not milliseconds,
-    but once per worker, not per task).
-
-    Each worker's own BLAS/OpenMP thread pool is capped to 1 thread before
-    any are spawned: left alone, every one of the n_workers processes
-    independently sizes its internal thread pool to the *whole machine's*
-    core count (confirmed live: 80 workers x ~96 threads each -> 13,553
-    threads total, load average 2216 on a 96-core box, system-wide lag).
-    The parallelism here is meant to come entirely from n_workers
-    independent *processes* -- each one single-threaded is the right
-    building block for that, not n_workers processes each ALSO trying to
-    be internally multi-threaded on top of it. Must be set as an
-    environment variable in THIS (parent) process before the pool is
-    created, not inside the worker function: torch sizes its thread pool
-    from these vars at import time, and by the time any of our own code
-    (_train_one/_fp_one) runs inside a freshly-spawned worker, this
-    module's own top-level `import torch` (re-executed because 'spawn'
-    re-imports the module to find the target function) has already
-    triggered that sizing -- too late to fix from inside the worker itself,
-    only early enough if the *spawned process* inherits the variable
-    already set, which it does from this parent's environment at spawn
-    time.
+    skip_if(*args) -> bool, checked only when n_workers <= 1 (sequential):
+    lets a caller skip a task based on an earlier task's own outcome within
+    this same run, yielding `_SKIPPED` in place of a result -- not checked
+    when n_workers > 1, since parallel workers have no visibility into
+    sibling workers' outcomes (see cmd_frame_potential's `stuck` set for
+    why that asymmetry is accepted there, not an oversight here).
     """
     if n_workers <= 1:
         for i, args_tuple in enumerate(arg_tuples):
+            if skip_if is not None and skip_if(*args_tuple):
+                yield i, _SKIPPED
+                continue
             try:
                 yield i, fn(*args_tuple)
             except Exception as e:
@@ -136,6 +109,40 @@ def _parallel_map(fn, arg_tuples, n_workers):
                 yield futures[future], future.result()
             except Exception as e:
                 yield futures[future], e
+
+
+def build_combos(circuits, n_qubits, max_params, multiplier=1, generic=False):
+    """For each circuit in `circuits`, the (num, reps) pairs (reps possibly
+    repeated per num) whose multiplier * n_trainable stays within
+    max_params -- see reps_for_param_budget, which does the actual
+    per-circuit search. The caller combines this with whatever OTHER axes
+    it sweeps (t for frame-potential; n_qubits/layers for train, which
+    calls this once per (n_qubits, layers) pair, passing that layers value
+    as `multiplier`).
+
+    Prints a progress line per circuit and a skip message for any circuit
+    where even reps=1 is already over budget: building this sweep calls
+    n_trainable (a real PennyLane forward+backward pass) once per reps
+    value tried, per circuit, which for a long --circuits list (e.g.
+    --generic with no --circuits, sweeping every architecture) can take
+    tens of seconds with nothing else printed yet -- indistinguishable
+    from a hang without this.
+    """
+    combos = []
+    for i, num in enumerate(circuits, start=1):
+        arch = get_architecture(num, generic=generic)
+        t0 = time.time()
+        reps_list = reps_for_param_budget(arch, n_qubits, max_params, multiplier=multiplier)
+        print(f"  [{i}/{len(circuits)}] circuit {num} (n_qubits={n_qubits}"
+              f"{f', layers={multiplier}' if multiplier != 1 else ''}): "
+              f"reps={reps_list} ({time.time() - t0:.1f}s)")
+        if not reps_list:
+            print(f"    skipped -- even reps=1 already has "
+                  f"{multiplier * arch.n_trainable(n_qubits, 1)} "
+                  f"trainable parameters, over --max-params {max_params}")
+            continue
+        combos.extend((num, reps) for reps in reps_list)
+    return combos
 
 
 def parse_circuits(values, generic: bool = False):
@@ -161,6 +168,67 @@ def parse_circuits(values, generic: bool = False):
     return circuits
 
 
+def _common_parser():
+    """Flags with the same meaning in both `train` and `frame-potential` --
+    declared once and shared via `parents=[...]` instead of twice with
+    copied help text. --n-qubits and --out are deliberately NOT here: they
+    take several values in `train` and one in `frame-potential`, and mean
+    a directory vs. a file respectively -- a real inconsistency to
+    reconcile later (see the code review's section 5 "format" item), not
+    one to paper over by forcing them into a shared declaration now. --out
+    keeps its own default here (None) and is resolved to each command's
+    actual default in cmd_train/cmd_frame_potential.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--circuits", type=str, nargs="+", default=None,
+                    help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated). "
+                         "With --generic, each value is a generic_ansatz code instead "
+                         "(ranges aren't meaningful there), or 'all' for every "
+                         "non-redundant architecture from generic_ansatz.list_architectures(). "
+                         "Default: '1-19' normally, 'all' with --generic.")
+    p.add_argument("--generic", action="store_true",
+                    help="interpret --circuits as generic_ansatz codes instead of "
+                         "circuit_set numbers -- see generic_ansatz.py's module docstring")
+    p.add_argument("--reps", type=int, nargs="+", default=None,
+                    help="ansatz repetitions to sweep (default: 1 2 3; for train, "
+                         "this is per layer -- anzats_reps). Mutually exclusive "
+                         "with --max-params.")
+    p.add_argument("--max-params", type=int, default=None,
+                    help="instead of a fixed --reps list, sweep reps=1,2,3,... "
+                         "*per circuit* for as long as circuits.n_trainable(num, "
+                         "n_qubits, reps) stays within this budget (for train, "
+                         "also multiplied by --layers, since that's an "
+                         "independent copy of the same reps-parametrized block --  "
+                         "see reps_for_param_budget's docstring) -- lets "
+                         "architectures with very different params-per-rep be "
+                         "compared at a matched parameter count instead of a "
+                         "matched rep count. Mutually exclusive with --reps.")
+    p.add_argument("--seed", type=int, default=None,
+                    help="best-effort reproducibility -- does not make the whole "
+                         "sweep bit-for-bit deterministic, and with --n-workers > 1 "
+                         "each worker seeds its own generator from this same value "
+                         "rather than sharing one stateful generator, so draws "
+                         "differ from the --n-workers 1 case even at the same --seed")
+    p.add_argument("--out", default=None,
+                    help="train: directory for experiments.csv/costs/ (default "
+                         "results/). frame-potential: path to the CSV (default "
+                         "results/frame_potential.csv)")
+    p.add_argument("--notes", default="")
+    p.add_argument("--quiet", action="store_true", help="suppress the per-run report")
+    p.add_argument("--n-workers", type=int, default=1,
+                    help="run this many combos concurrently, in separate OS "
+                         "processes (default: 1, sequential) -- see this module's "
+                         "own docstring for why processes/--n-workers is the lever "
+                         "that uses the rest of a many-core machine, and "
+                         "_parallel_map's docstring for the mechanics. For "
+                         "frame-potential on --device cuda specifically: several "
+                         "worker processes sharing one GPU usually lose to a "
+                         "single process with a bigger --n-samples batch instead "
+                         "(see _fp_one's docstring) -- this is really meant for "
+                         "CPU runs.")
+    return p
+
+
 # ── train ───────────────────────────────────────────────────────────────
 
 def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes):
@@ -171,17 +239,16 @@ def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes)
     see run_training's own docstring for why).
 
     Blinds this process to CUDA first (see cmd_train's identical line for
-    why): training never asks for a GPU anywhere in its own code (no
-    --device flag even exists for `train`, unlike frame-potential), but on
-    a machine that has one, recent PyTorch optimizer internals probe
-    torch.accelerator.current_stream() on every .step() regardless -- which
-    tries to retain a CUDA context purely for that probe. With --n-workers
-    spawning many concurrent processes each doing this, that's enough
-    *context* overhead alone (no real tensors on it) to OOM the GPU, for a
-    device training was never going to use. Set again here (not just in
-    cmd_train) in case a future multiprocessing start method stops
-    inheriting the parent's already-modified environment the way today's
-    default ('fork' on Linux) does.
+    why): training never asks for a GPU (no --device flag exists for
+    `train`), but recent PyTorch optimizer internals probe
+    torch.accelerator.current_stream() on every .step() regardless, which
+    retains a CUDA context for that alone -- with --n-workers spawning many
+    concurrent processes doing this, that context overhead can OOM a GPU
+    training was never going to use. Set again here (not just in cmd_train)
+    purely as a defensive belt-and-suspenders: _parallel_map's 'spawn'
+    start method re-executes this whole module fresh in the worker and
+    does inherit the parent's already-set env var today, so this is
+    redundant unless that stops being true.
     """
     import os
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
@@ -198,33 +265,14 @@ def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes)
     return result, _time.time() - t0
 
 
-def add_train_parser(sub):
-    p = sub.add_parser("train", help="train circuit_set (or generic_ansatz) architectures on Fourier-series targets")
-    p.add_argument("--circuits", type=str, nargs="+", default=None,
-                    help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated). "
-                         "With --generic, each value is a generic_ansatz code instead "
-                         "(ranges aren't meaningful there), or 'all' for every "
-                         "non-redundant architecture from generic_ansatz.list_architectures(). "
-                         "Default: '1-19' normally, 'all' with --generic.")
-    p.add_argument("--generic", action="store_true",
-                    help="interpret --circuits as generic_ansatz codes instead of "
-                         "circuit_set numbers -- see generic_ansatz.py's module docstring")
+def add_train_parser(sub, common):
+    p = sub.add_parser("train", parents=[common],
+                        help="train circuit_set (or generic_ansatz) architectures on Fourier-series targets")
     p.add_argument("--n-qubits", type=int, nargs="+", default=[6])
     p.add_argument("--layers", type=int, nargs="+", default=[3],
                     help="number of data-reuploading layers -- stays fixed per sweep "
                          "point even with --max-params (see --max-params); it's the "
                          "reps budget-sweep that mirrors frame-potential's, not layers")
-    p.add_argument("--reps", type=int, nargs="+", default=None,
-                    help="ansatz repetitions per layer (anzats_reps) to sweep "
-                         "(default: 1 2 3). Mutually exclusive with --max-params.")
-    p.add_argument("--max-params", type=int, default=None,
-                    help="instead of a fixed --reps list, sweep reps=1,2,3,... "
-                         "*per circuit* (at each fixed --layers value) for as long "
-                         "as layers * circuits.n_trainable(num, n_qubits, reps) "
-                         "stays within this budget -- same idea as "
-                         "frame-potential's --max-params, so a circuit's training "
-                         "cost and its F^(t) can be compared at matched parameter "
-                         "counts instead of matched reps. Mutually exclusive with --reps.")
     p.add_argument("--degrees", type=int, nargs="+", default=[10],
                     help="degree(s) of the target Fourier series")
     p.add_argument("--n-functions", type=int, default=5,
@@ -233,24 +281,6 @@ def add_train_parser(sub):
                     help="x points sampled on [-pi, pi] per target function")
     p.add_argument("--max-steps", type=int, default=600)
     p.add_argument("--batch-size", type=int, default=100)
-    p.add_argument("--seed", type=int, default=None,
-                    help="best-effort reproducibility: seeds target-function "
-                         "generation and training; does not make the whole "
-                         "sweep bit-for-bit deterministic")
-    p.add_argument("--out", default="results/", help="directory for experiments.csv / costs.csv")
-    p.add_argument("--notes", default="")
-    p.add_argument("--quiet", action="store_true")
-    p.add_argument("--n-workers", type=int, default=1,
-                    help="train this many (circuit, n_qubits, layers, reps) combos "
-                         "concurrently, in separate OS processes (default: 1, i.e. "
-                         "today's sequential behavior). Good value: close to the "
-                         "machine's core count for a CPU run -- each run's own "
-                         "compute is too small to use more than one core by itself "
-                         "(see run.py's module docstring), so this is the lever that "
-                         "actually uses the rest of the machine on a big sweep. All "
-                         "file writing still happens in the main process (one writer, "
-                         "no concurrent-CSV-append risk), only training runs in the "
-                         "workers.")
     return p
 
 
@@ -272,33 +302,19 @@ def cmd_train(args):
 
     circuits_arg = args.circuits if args.circuits is not None else (["all"] if args.generic else ["1-19"])
     circuits = parse_circuits(circuits_arg, generic=args.generic)
+    out = args.out if args.out is not None else "results/"
 
     if args.max_params is not None:
         # layers stays fixed per sweep point (the outer loop below); only
-        # reps is budget-driven, same as frame-potential's --max-params --
-        # see reps_for_param_budget's docstring for why layers is the
-        # multiplier rather than another budget-swept dimension.
-        # see cmd_frame_potential's comment on the identical loop there: this
-        # calls n_trainable (a real PennyLane forward+backward pass) once per
-        # reps tried, per circuit -- printing only on a skip left a long,
-        # silent (and, before a fix elsewhere, occasionally infinite) wait
-        # that was indistinguishable from a hang.
+        # reps is budget-driven -- see reps_for_param_budget's docstring
+        # for why layers is the multiplier rather than another
+        # budget-swept dimension.
         combos = []
         for n_qubits in args.n_qubits:
             for layers in args.layers:
-                for i, num in enumerate(circuits, start=1):
-                    arch = get_architecture(num, generic=args.generic)
-                    t_budget0 = time.time()
-                    reps_list = reps_for_param_budget(arch, n_qubits, args.max_params,
-                                                        multiplier=layers)
-                    print(f"  [{i}/{len(circuits)}] circuit {num} (n_qubits={n_qubits}, layers={layers}): "
-                          f"reps={reps_list} ({time.time() - t_budget0:.1f}s)")
-                    if not reps_list:
-                        print(f"    skipped -- even reps=1 already has "
-                              f"{layers * arch.n_trainable(n_qubits, 1)} "
-                              f"trainable parameters, over --max-params {args.max_params}")
-                        continue
-                    combos.extend((n_qubits, layers, reps, num) for reps in reps_list)
+                for num, reps in build_combos(circuits, n_qubits, args.max_params,
+                                               multiplier=layers, generic=args.generic):
+                    combos.append((n_qubits, layers, reps, num))
         print(f"degrees={args.degrees} n_functions={args.n_functions} circuits={circuits} "
               f"n_qubits={args.n_qubits} layers={args.layers} max_params={args.max_params} "
               f"-> {len(combos)} (n_qubits, layers, reps, circuit) combos")
@@ -342,7 +358,7 @@ def cmd_train(args):
                   f"n_qubits={n_qubits} layers={layers} reps={reps}: {outcome!r}")
             continue
         result, elapsed = outcome
-        record_training(result, path=args.out)
+        record_training(result, path=out)
         if not args.quiet:
             print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) degree={degree} fn={fn_i} "
                   f"circuit={num} n_qubits={n_qubits} layers={layers} reps={reps} "
@@ -350,19 +366,35 @@ def cmd_train(args):
 
     failed_note = f", {n_failed} failed (see FAILED lines above)" if n_failed else ""
     print(f"\nDone: {n_runs - n_failed}/{n_runs} runs recorded in {time.time() - t0:.1f}s"
-          f"{failed_note} -> {args.out}")
+          f"{failed_note} -> {out}")
 
 
 # ── frame-potential ─────────────────────────────────────────────────────
 
 def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
-            device, dtype, seed):
+            device, dtype, seed=None, generator=None, verbose=False):
     """One (circuit, reps, t) frame-potential estimate -- module-level and
     self-contained so it can be sent to a worker process by _parallel_map
     (see _train_one's docstring for why). Already pure compute with no file
     I/O of its own -- fp.estimate_once/estimate_until_converged never
     touched disk, only the fp.save_estimate call in cmd_frame_potential
     does, which stays in the main process.
+
+    Exactly one of seed/generator is meaningful. At --n-workers 1,
+    cmd_frame_potential passes the SAME `generator` object (not picklable,
+    but also never needs to be -- this runs in-process) to every call, so
+    it keeps advancing across the whole sweep, exactly as a single
+    sequential loop always has. At --n-workers > 1, it passes `seed`
+    instead (a plain int, picklable) and leaves `generator` None, so each
+    worker builds its own fresh one here -- a shared, evolving generator
+    object cannot cross a process boundary at all, so this is not a
+    duplicated-vs-unified-code-path question, it's a real constraint;
+    draws at --n-workers > 1 do not reproduce the --n-workers 1 case even
+    at the same --seed (same caveat cmd_train's --seed help already makes).
+
+    verbose should only ever be True at --n-workers 1: concurrent workers'
+    prints would interleave into garbage, so cmd_frame_potential passes
+    False whenever --n-workers > 1 regardless of --quiet.
 
     GPU note: if --device cuda, every worker process opens its own CUDA
     context on the *same* GPU -- several of them competing for one GPU's
@@ -374,12 +406,13 @@ def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
     import torch as _torch
     import frame_potential as _fp
     t0 = _time.time()
-    generator = _torch.Generator().manual_seed(seed) if seed is not None else None
+    if generator is None and seed is not None:
+        generator = _torch.Generator().manual_seed(seed)
     if converge:
         est = _fp.estimate_until_converged(
             arch, n_qubits, reps, t,
             n_samples=n_samples, rel_tol=rel_tol, max_batches=max_batches,
-            device=device, dtype=dtype, generator=generator, verbose=False,
+            device=device, dtype=dtype, generator=generator, verbose=verbose,
         )
     else:
         n = n_samples or (2 ** n_qubits * t)
@@ -388,55 +421,23 @@ def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
     return est, _time.time() - t0
 
 
-def add_frame_potential_parser(sub):
-    p = sub.add_parser("frame-potential", help="estimate F^(t) for circuit_set (or generic_ansatz) architectures")
-    p.add_argument("--circuits", type=str, nargs="+", default=None,
-                    help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated). "
-                         "With --generic, each value is a generic_ansatz code instead "
-                         "(ranges aren't meaningful there), or 'all' for every "
-                         "non-redundant architecture from generic_ansatz.list_architectures(). "
-                         "Default: '1-19' normally, 'all' with --generic.")
-    p.add_argument("--generic", action="store_true",
-                    help="interpret --circuits as generic_ansatz codes instead of "
-                         "circuit_set numbers -- see generic_ansatz.py's module docstring")
+def add_frame_potential_parser(sub, common):
+    p = sub.add_parser("frame-potential", parents=[common],
+                        help="estimate F^(t) for circuit_set (or generic_ansatz) architectures")
     p.add_argument("--n-qubits", type=int, default=6)
-    p.add_argument("--reps", type=int, nargs="+", default=None,
-                    help="ansatz repetitions to sweep (default: 1 2 3). Mutually "
-                         "exclusive with --max-params.")
-    p.add_argument("--max-params", type=int, default=None,
-                    help="instead of a fixed --reps list, sweep reps=1,2,3,... "
-                         "*per circuit* for as long as circuits.n_trainable(num, "
-                         "n_qubits, reps) stays within this budget -- lets "
-                         "architectures with very different params-per-rep be "
-                         "compared at a matched parameter count instead of a "
-                         "matched rep count. Mutually exclusive with --reps.")
     p.add_argument("--t", type=int, nargs="+", default=[2])
     p.add_argument("--n-samples", type=int, default=None,
                     help="samples per batch (default: 2**n_qubits * t)")
     p.add_argument("--converge", action="store_true",
                     help="keep pooling batches until the 95%% CI is tight (see --rel-tol); "
-                         "default is a single batch of --n-samples")
+                         "default is a single batch of --n-samples. With --n-workers > 1, "
+                         "the already-exhausted-at-a-smaller-reps skip (`stuck`) only "
+                         "applies at --n-workers 1 -- see _parallel_map's skip_if docstring.")
     p.add_argument("--rel-tol", type=float, default=0.4)
     p.add_argument("--max-batches", type=int, default=50)
     p.add_argument("--device", choices=["cpu", "cuda"], default=None,
                     help="default: cuda if available, else cpu")
     p.add_argument("--dtype", choices=["complex64", "complex128"], default="complex64")
-    p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--out", default=fp.FRAME_POTENTIAL_CSV)
-    p.add_argument("--notes", default="")
-    p.add_argument("--quiet", action="store_true", help="suppress the per-run report")
-    p.add_argument("--n-workers", type=int, default=1,
-                    help="estimate this many (circuit, reps, t) combos concurrently, "
-                         "in separate OS processes (default: 1, i.e. today's sequential "
-                         "behavior) -- see train's --n-workers help for why processes, "
-                         "not threads. Intended for --device cpu: for cuda, several "
-                         "worker processes share one GPU and usually lose to a single "
-                         "process with a bigger --n-samples batch instead (see _fp_one's "
-                         "docstring). With --converge and --n-workers > 1, the "
-                         "already-exhausted-at-a-smaller-reps skip (`stuck`) is not "
-                         "applied across workers -- each combo runs independently, so a "
-                         "few extra already-doomed convergence attempts (bounded by "
-                         "--max-batches each) can happen instead of being skipped.")
     return p
 
 
@@ -496,34 +497,14 @@ def cmd_frame_potential(args):
 
     circuits_arg = args.circuits if args.circuits is not None else (["all"] if args.generic else ["1-19"])
     circuits = parse_circuits(circuits_arg, generic=args.generic)
+    out = args.out if args.out is not None else fp.FRAME_POTENTIAL_CSV
     device = torch.device(args.device) if args.device else fp.get_device()
     dtype = torch.complex64 if args.dtype == "complex64" else torch.complex128
-    generator = torch.Generator().manual_seed(args.seed) if args.seed is not None else None
 
     if args.max_params is not None:
-        # Building this sweep means calling n_trainable (a real forward+backward
-        # pass through a PennyLane QNode) once per reps value tried, per
-        # circuit -- for a large --circuits list (e.g. --generic with no
-        # --circuits, which sweeps every architecture) that can take tens of
-        # seconds with nothing else printed yet, which looks identical to a
-        # hang. One line per circuit here, as it's computed, instead of only
-        # ever printing on a skip, is the fix for that -- not just reassurance,
-        # it also makes a genuinely slow or runaway architecture's reps count
-        # (or render time) visible immediately instead of after the whole
-        # list finishes.
         combos = []
-        for i, num in enumerate(circuits, start=1):
-            arch = get_architecture(num, generic=args.generic)
-            t_budget0 = time.time()
-            reps_list = reps_for_param_budget(arch, args.n_qubits, args.max_params)
-            print(f"  [{i}/{len(circuits)}] circuit {num}: reps={reps_list} "
-                  f"({time.time() - t_budget0:.1f}s)")
-            if not reps_list:
-                print(f"    skipped -- even reps=1 already has "
-                      f"{arch.n_trainable(args.n_qubits, 1)} trainable parameters, "
-                      f"over --max-params {args.max_params}")
-                continue
-            combos.extend(product([num], reps_list, args.t))
+        for num, reps in build_combos(circuits, args.n_qubits, args.max_params, generic=args.generic):
+            combos.extend(product([num], [reps], args.t))
         print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
               f"max_params={args.max_params} t={args.t} converge={args.converge}")
     else:
@@ -534,79 +515,64 @@ def cmd_frame_potential(args):
 
     n_runs = len(combos)
     t0 = time.time()
+    verbose = args.n_workers <= 1 and not args.quiet
+    # One shared, evolving generator for the whole sweep at --n-workers 1
+    # (exactly like a single sequential loop always has -- see _fp_one's
+    # docstring for why --n-workers > 1 can't share this and uses `seed`
+    # instead); it runs in-process so never needs to be picklable.
+    shared_generator = (torch.Generator().manual_seed(args.seed)
+                        if args.seed is not None and args.n_workers <= 1 else None)
+    arg_tuples = [
+        (get_architecture(num, generic=args.generic), args.n_qubits, reps, t, args.converge,
+         args.n_samples, args.rel_tol, args.max_batches, device, dtype,
+         args.seed if args.n_workers > 1 else None, shared_generator, verbose)
+        for (num, reps, t) in combos
+    ]
 
-    if args.n_workers <= 1:
-        # (num, t) pairs where a smaller reps already exhausted --max-batches
-        # without satisfying estimate_until_converged's own stopping rule.
-        # combos is built with reps non-decreasing for any fixed (num, t) (both
-        # branches above sweep reps in increasing order per circuit), so once a
-        # pair lands here every later occurrence is a strictly larger reps --
-        # safe to skip: more reps can only move F^(t) closer to Haar, shrinking
-        # delta further, which only makes the (already unmet) rel_tol*delta
-        # target harder to hit, never easier. Re-running would just burn
-        # another full --max-batches for no new information. Only tracked
-        # sequentially -- see the --n-workers > 1 branch below for why.
-        stuck = set()
-        for i, (num, reps, t) in enumerate(combos, start=1):
-            if args.converge and (num, t) in stuck:
-                print(f"[{i}/{n_runs}] skipped: circuit {num} (t={t}) already exhausted "
-                      f"--max-batches={args.max_batches} without converging at a smaller reps -- "
-                      "more reps won't change that, only raising --max-batches would.")
-                continue
-            arch = get_architecture(num, generic=args.generic)
-            run_t0 = time.time()
-            if args.converge:
-                est = fp.estimate_until_converged(
-                    arch, args.n_qubits, reps, t,
-                    n_samples=args.n_samples, rel_tol=args.rel_tol, max_batches=args.max_batches,
-                    device=device, dtype=dtype, generator=generator, verbose=not args.quiet,
-                )
-                if not _converged(est, args.rel_tol):
-                    stuck.add((num, t))
-            else:
-                n_samples = args.n_samples or (2 ** args.n_qubits * t)
-                est = fp.estimate_once(
-                    arch, args.n_qubits, reps, t, n_samples,
-                    device=device, dtype=dtype, generator=generator,
-                )
-            fp.save_estimate(est, arch=arch, n_qubits=args.n_qubits, reps=reps,
-                              device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
-            if not args.quiet:
-                print(f"[{i}/{n_runs}] ({time.time() - run_t0:.1f}s) \n" +
-                      fp.report(est, arch=arch, n_qubits=args.n_qubits, reps=reps))
-    else:
-        # No `stuck` skip across workers here (see --n-workers's own help):
-        # each combo is dispatched independently, with no visibility into
-        # sibling workers' outcomes. Every worker seeds its own generator
-        # from the same --seed (can't share one stateful Generator object
-        # across processes), so this branch's draws don't reproduce the
-        # n_workers<=1 branch's even at the same --seed -- same caveat
-        # cmd_train's --seed help already makes for that command.
-        arg_tuples = [
-            (get_architecture(num, generic=args.generic), args.n_qubits, reps, t, args.converge,
-             args.n_samples, args.rel_tol, args.max_batches, device, dtype, args.seed)
-            for (num, reps, t) in combos
-        ]
-        n_failed = 0
-        for i, outcome in _parallel_map(_fp_one, arg_tuples, args.n_workers):
-            num, reps, t = combos[i]
-            arch = get_architecture(num, generic=args.generic)
-            if isinstance(outcome, Exception):
-                n_failed += 1
-                print(f"[{i + 1}/{n_runs}] FAILED circuit {num} reps={reps} t={t}: {outcome!r}")
-                continue
-            est, elapsed = outcome
-            fp.save_estimate(est, arch=arch, n_qubits=args.n_qubits, reps=reps,
-                              device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=args.out)
-            if not args.quiet:
-                print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) \n" +
-                      fp.report(est, arch=arch, n_qubits=args.n_qubits, reps=reps))
-        failed_note = f", {n_failed} failed (see FAILED lines above)" if n_failed else ""
-        print(f"\nDone: {n_runs - n_failed}/{n_runs} runs recorded in {time.time() - t0:.1f}s"
-              f"{failed_note} -> {args.out}")
-        return
+    # (num, t) pairs where a smaller reps already exhausted --max-batches
+    # without satisfying estimate_until_converged's own stopping rule.
+    # combos is built with reps non-decreasing for any fixed (num, t) (both
+    # branches above sweep reps in increasing order per circuit), so once a
+    # pair lands here every later occurrence is a strictly larger reps --
+    # safe to skip: more reps can only move F^(t) closer to Haar, shrinking
+    # delta further, which only makes the (already unmet) rel_tol*delta
+    # target harder to hit, never easier. Only consulted at --n-workers 1
+    # (see skip_if below and _parallel_map's own docstring) -- at
+    # --n-workers > 1 this still gets populated as results arrive, but
+    # _parallel_map's parallel branch never calls skip_if, so it has no
+    # effect there, matching the documented across-workers limitation.
+    stuck = set()
 
-    print(f"\nDone: {n_runs} runs in {time.time() - t0:.1f}s -> {args.out}")
+    def skip_if(arch, n_qubits, reps, t, *rest):
+        return args.converge and (arch.num, t) in stuck
+
+    n_failed = n_skipped = 0
+    for i, outcome in _parallel_map(_fp_one, arg_tuples, args.n_workers, skip_if=skip_if):
+        num, reps, t = combos[i]
+        if outcome is _SKIPPED:
+            n_skipped += 1
+            print(f"[{i + 1}/{n_runs}] skipped: circuit {num} (t={t}) already exhausted "
+                  f"--max-batches={args.max_batches} without converging at a smaller reps -- "
+                  "more reps won't change that, only raising --max-batches would.")
+            continue
+        if isinstance(outcome, Exception):
+            n_failed += 1
+            print(f"[{i + 1}/{n_runs}] FAILED circuit {num} reps={reps} t={t}: {outcome!r}")
+            continue
+        est, elapsed = outcome
+        arch = get_architecture(num, generic=args.generic)
+        if args.converge and not _converged(est, args.rel_tol):
+            stuck.add((num, t))
+        fp.save_estimate(est, arch=arch, n_qubits=args.n_qubits, reps=reps,
+                          device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=out)
+        if not args.quiet:
+            print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) \n" +
+                  fp.report(est, arch=arch, n_qubits=args.n_qubits, reps=reps))
+
+    failed_note = f", {n_failed} failed" if n_failed else ""
+    skipped_note = f", {n_skipped} skipped (already-doomed convergence)" if n_skipped else ""
+    print(f"\nDone: {n_runs - n_failed - n_skipped}/{n_runs} runs recorded in {time.time() - t0:.1f}s"
+          f"{failed_note}{skipped_note} -> {out}")
 
 
 # ── dispatch ────────────────────────────────────────────────────────────
@@ -614,8 +580,9 @@ def cmd_frame_potential(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="command", required=True)
-    add_train_parser(sub)
-    add_frame_potential_parser(sub)
+    common = _common_parser()
+    add_train_parser(sub, common)
+    add_frame_potential_parser(sub, common)
     args = p.parse_args()
 
     if args.command == "train":
