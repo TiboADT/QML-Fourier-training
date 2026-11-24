@@ -211,7 +211,7 @@ def bench_square_loss():
 def bench_training_step(devices):
     header("4. One training step, by device and batch size")
     try:
-        from functions import build_model, square_loss
+        from training import build_model, square_loss
         from architectures import get_architecture
     except ImportError as e:
         print(f"  skipped ({e}) — run from the repo root")

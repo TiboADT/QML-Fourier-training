@@ -7,7 +7,7 @@ from datetime import datetime
 import numpy as np
 
 import results_io
-from functions import train, build_model
+from training import train, build_model
 from architectures import Architecture
 
 # ------------------------------------------------------------------

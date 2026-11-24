@@ -253,7 +253,7 @@ def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes)
     import os
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     import time as _time
-    from experiment_tracker import run_training
+    from tracking import run_training
     t0 = _time.time()
     result = run_training(
         x, y, arch, n_qubits=n_qubits, layers=layers, anzats_reps=reps,
@@ -289,8 +289,8 @@ def cmd_train(args):
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     from pennylane import numpy as pnp
-    from experiment_tracker import record_training
-    from functions import function_to_learn
+    from tracking import record_training
+    from training import function_to_learn
 
     if args.seed is not None:
         pnp.random.seed(args.seed)
