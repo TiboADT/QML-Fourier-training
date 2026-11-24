@@ -12,7 +12,7 @@ every n. Two independent checks:
 
   2. Monte Carlo: sample_clifford_unitaries pushed through
      frame_potential's generic estimate_once_from_sampler, at n = 4, 6 --
-     the same code path any future two_designs family will use. If the
+     the same code path any future non-circuit_set ensemble will use. If the
      reported F^(t) isn't within its own confidence interval of t!, the bug
      is in the *general* Monte Carlo estimator, not in anything specific to
      Cliffords.
@@ -38,7 +38,7 @@ import time
 import torch
 
 import frame_potential as fp
-from two_designs.clifford_group import (
+from checks.clifford_group import (
     clifford_group_order,
     exact_estimate_from_group,
     iter_all_clifford_unitaries,

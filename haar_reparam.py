@@ -20,8 +20,8 @@ specific (still closed-form) reshaping, and the 3 non-local ("canonical")
 angles need a fully joint, non-separable reshaping with no simple
 closed-form inverse-CDF.
 
-This module supplies that reshaping ("Phi" in the design discussion) so
-that circuits.py's circuit_set(34), fed raw Uniform(0, 2*pi) parameters
+This module supplies that reshaping so that circuits.py's circuit_set(34),
+fed raw Uniform(0, 2*pi) parameters
 (exactly what sample_unitaries already produces for every other circuit),
 produces exactly Haar-distributed two-qubit unitaries. circuit_set(33) is
 the same gate structure with the raw angles used directly instead (no
@@ -67,13 +67,13 @@ Instead this module builds the reparametrization empirically and exactly:
        ty2 | (tz, ty1).
     4. At runtime, feed 3 fresh Uniform[0,1) numbers through that transform.
 
-This was validated end to end (see design session): pushing samples through
-this transform reproduces the exact Haar frame potential F^(t) = t! for
-t = 1, 2, 3 to within Monte Carlo error.
+This was validated end to end: pushing samples through this transform
+reproduces the exact Haar frame potential F^(t) = t! for t = 1, 2, 3 to
+within Monte Carlo error.
 
 Regenerating the tables
 ------------------------
-    python two_designs/haar_reparam.py --build [--n-samples 50000]
+    python haar_reparam.py --build [--n-samples 50000]
 
 writes kak1_rosenblatt_tables.npz next to this file. A table is checked
 into the repo so this is only needed if you want higher resolution or a
@@ -100,7 +100,7 @@ def _load_tables(device=None, dtype=torch.float64):
         return _cache[key]
     if not os.path.exists(_TABLE_PATH):
         raise FileNotFoundError(
-            f"{_TABLE_PATH} not found. Run `python two_designs/haar_reparam.py --build` "
+            f"{_TABLE_PATH} not found. Run `python haar_reparam.py --build` "
             "once to generate it (takes a few minutes)."
         )
     npz = np.load(_TABLE_PATH)

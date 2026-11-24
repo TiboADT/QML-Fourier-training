@@ -2,7 +2,7 @@
 Single CLI entry point for the repo's validation/benchmark scripts, which
 live in checks/ (used by the paper) and extras/ (not used by the paper --
 benchmark.py, and two of the three validate checks) -- kept separate from
-the library code in circuits.py, frame_potential.py, two_designs/, etc.
+the library code in circuits.py, frame_potential.py, haar_reparam.py, etc.
 (checks/extras is things you *run*, the rest is things you *import*).
 
 Examples
@@ -10,7 +10,7 @@ Examples
     python check.py benchmark                     # timing benchmarks (everything)
     python check.py benchmark --only fp           # timing benchmarks (frame potential only)
     python check.py benchmark --only stress       # frame potential at higher n_qubits, on GPU if present
-    python check.py validate                      # every two_designs calibration check
+    python check.py validate                      # every calibration check
     python check.py validate --only clifford      # just the Clifford-group one
     python check.py validate --only a             # same thing, short alias
     python check.py validate --only local-random  # just the local-random-circuit one

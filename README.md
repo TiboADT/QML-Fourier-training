@@ -8,19 +8,32 @@ compared to the Haar reference `F/F_Haar`).
 ## Contents
 
 - `circuits.py`: 19 architectures from a paper (***mettre la ref***)(`circuit_set(num)`, `num` 1-19)
-  plus a few extras (30-36, see below), `weight_tensor_shape` (parameter
+  plus a few extras (30, 32-34, see below), `weight_tensor_shape` (parameter
   tensor shape per architecture), and `n_trainable` (how many of those
   parameters a circuit actually reads — several architectures allocate more
   than they use).
-- `two_designs/`: ensembles from the "Building 2-Designs" design notes that
-  aren't `circuit_set` architectures, plus `haar_reparam.py` — see below.
-- `functions.py`: the target Fourier functions to fit, the training loop
+- `generic_ansatz.py`: a second, numerically-encoded ansatz builder (any
+  (rotation, connectivity, structure, gate) combination from a 5-digit
+  code) alongside `circuits.py`'s hardcoded numbers — see its own module
+  docstring for the encoding.
+- `architectures.py`: `Architecture(num, generic)` — one small object
+  bundling a `circuit_set` number or `generic_ansatz` code with whether
+  it's generic, so every function that builds/sizes a circuit takes one
+  argument instead of a hand-passed `(num, generic)` pair.
+- `haar_reparam.py`: the exact-Haar reparametrization circuits 33/34 use
+  for their KAK1 block — see "Local random circuits" below.
+- `simulation.py`: batched, GPU-compatible unitary construction (gate
+  tracing and fusion) shared by every frame-potential estimator.
+- `frame_potential.py`: the `Estimate` accumulator and the estimators
+  built on it (one Monte Carlo batch, or loop until the confidence
+  interval is tight).
+- `results_io.py`: shared CSV-append logic (header-mismatch guard, git
+  commit hash) used by both `frame_potential.py` and `tracking.py`.
+- `training.py`: the target Fourier functions to fit, the training loop
   (`train`), and the QNode builder (`build_model`).
-- `experiment_tracker.py`: runs `train` and appends one row per run to
+- `tracking.py`: runs `train` and appends one row per run to
   `results/experiments.csv` (metadata), saving each cost curve to its own
   `results/costs/{experiment_id}.npy`.
-- `frame_potential.py`: batched, GPU-compatible frame-potential estimation
-  computed directly from `circuit_set` (see below).
 - `run.py`: CLI for both training and frame-potential estimation (`train`
   and `frame-potential` subcommands). Retires the old `test.py` (hardcoded
   constants, no CLI, no seeding) — `run.py train` reproduces the same sweep
@@ -55,8 +68,8 @@ make install
 
 ```python
 from architectures import get_architecture
-from experiment_tracker import train_and_record
-from functions import function_to_learn
+from tracking import train_and_record
+from training import function_to_learn
 import torch
 
 target = function_to_learn(degree=2)
@@ -72,7 +85,7 @@ Every run appends a row to `results/experiments.csv` (`n_params` is the
 number of parameters the circuit actually reads, not the raw tensor size —
 see `n_trainable` in `circuits.py`; `n_expvals` is the number of times the
 circuit's expectation value was actually estimated over the whole run --
-see `build_model`'s `counted_circuit` in `functions.py` -- a more honest cost
+see `build_model`'s `counted_circuit` in `training.py` -- a more honest cost
 metric than `max_steps`, since unlike a step count it scales with
 `batch_size` and `n_train_samples` too, the way the real quantum-resource
 cost does; with the defaults above it's dominated by the two full-dataset
@@ -259,9 +272,9 @@ apply local dressings, no canonical core at all. `reps=3` is the smallest
 value that actually applies one real 2-qubit gate — that's why the
 examples above use it.
 
-`two_designs/haar_reparam.py`'s tables (`two_designs/kak1_rosenblatt_tables.npz`,
+`haar_reparam.py`'s tables (`kak1_rosenblatt_tables.npz`,
 checked into the repo) were built from 50,000 Haar-random `SU(4)` samples;
-regenerate with `python two_designs/haar_reparam.py --build [--n-samples N]`
+regenerate with `python haar_reparam.py --build [--n-samples N]`
 (needs `scipy`, offline only — not a runtime dependency). Calibration
 checks for circuit 34 — including an explicit check for the
 convergence-loop pitfall described under "Checks" below — live in
@@ -274,17 +287,14 @@ every gate there is independent, with no earlier gate's dressing to
 inherit, so it always builds a full, standalone (both-sides-dressed)
 block rather than relying on an upfront layer.
 
-### `two_designs/`: ensembles from the "Building 2-Designs" notes
+### Ensembles that aren't `circuit_set` architectures
 
-Some ensembles worth benchmarking against aren't `circuit_set` architectures
-at all — no continuous parameters, no PennyLane gates to trace — so they
-don't fit `circuit_set(num)`'s numbering. `two_designs/` is where the
-reusable code for those lives, one file per ensemble from the design notes
-(named for what they are, not for the design notes' own "Family A/B/C..."
-labels — those are cross-referenced in each module's docstring for anyone
-going back to the source, but aren't used as identifiers here); the
-runnable script that exercises each one lives in `checks/` instead (see
-"Checks" below).
+Some ensembles worth benchmarking against aren't `circuit_set`/
+`generic_ansatz` architectures at all — no continuous parameters, no
+PennyLane gates to trace — so they don't fit either one's numbering; the
+reusable code for each lives next to the rest of the core modules above
+(`haar_reparam.py`, `checks/clifford_group.py`), while the runnable script
+that exercises each one lives in `checks/` (see "Checks" below).
 
 To support them without duplicating the accumulation/pooling/confidence-
 interval logic, `frame_potential.py`'s estimators are split into a
@@ -295,13 +305,12 @@ circuit_set-specific layer and a generic one underneath:
   `sampler(batch_size, *, device, dtype, generator) -> Tensor[batch_size, d, d]`
   callable and `d` (the sampler can't be introspected for it). This is where
   the actual math lives.
-- `estimate_once(num, n_qubits, reps, t, ...)` /
-  `estimate_until_converged(num, n_qubits, reps, t, ...)` — unchanged
-  signatures, now thin wrappers that build a `circuit_set`-backed sampler
-  and delegate. Every existing call site (`run.py`, this README,
-  `extras/benchmark.py`) keeps working exactly as before.
+- `estimate_once(arch, n_qubits, reps, t, ...)` /
+  `estimate_until_converged(arch, n_qubits, reps, t, ...)` — thin wrappers,
+  for an `Architecture`, that build a `circuit_set`/`generic_ansatz`-backed
+  sampler and delegate.
 
-**Random Clifford circuits** (`two_designs/clifford_group.py`) — not an
+**Random Clifford circuits** (`checks/clifford_group.py`) — not an
 ansatz, a calibration check. The Clifford group is an exact 3-design, so
 `F^(t)` must come out to exactly `t!` for `t = 1, 2, 3` at every `n` (`t! `
 is only the exact Haar value for `t <= d = 2**n_qubits` — Schur–Weyl needs
@@ -310,8 +319,8 @@ a valid check and isn't one). Any value that isn't `t!` (for `t <= d`)
 within its confidence interval is a bug in the estimator, not a discovery.
 
 Two ways to check it, both in `checks/validate_clifford.py` (see "Checks"
-below for why the runnable script lives in `checks/` while the reusable
-sampler/exact-group functions it calls stay in `two_designs/`):
+below for why the runnable script and the reusable sampler/exact-group
+functions it calls both live in `checks/`):
 
 - **Exact.** For `n_qubits` small enough to enumerate the *entire* Clifford
   group (`n=1`: 24 elements, `n=2`: 11,520 — via `stim.Tableau.iter_all`),
@@ -347,8 +356,8 @@ local in the same style as circuit 34 (independently randomized per layer
 rather than circuit 34's fixed alternating pattern — see
 `random_matching`'s docstring); `max_range >= n_qubits - 1` removes the
 restriction entirely, so any pair can be wired together ("permuted
-brickwork" in the design notes) — connectivity as an axis independent of
-gate count, which is the whole point.
+brickwork", the fully-connected limit) — connectivity as an axis
+independent of gate count, which is the whole point.
 
 The wiring has to vary *per sample*, which a `circuit_set` architecture has
 no room for (one gate sequence traced once, then batch-applied with random
@@ -382,8 +391,8 @@ Reading a column down shows the gain from more depth at fixed range;
 reading a row across shows the gain from more reach at fixed depth — here,
 `range<=1` at `reps=8` (ratio 1.19) is still further from Haar than
 `range<=3` reaches at half the depth, `reps=4` (ratio 1.04), reproducing
-the design notes' claim that letting gates reach further matters as much
-as adding more of them at fixed gate count. Customize the sweep — it
+the general claim that letting gates reach further matters as much as
+adding more of them at fixed gate count. Customize the sweep — it
 forwards extra arguments straight to `extras/validate_connectivity.py`'s
 own `argparse` parser:
 
@@ -403,7 +412,7 @@ subcommand style:
 python check.py benchmark                       # timing benchmarks (everything)
 python check.py benchmark --only fp             # timing benchmarks, frame-potential only
 python check.py benchmark --only stress         # frame potential at higher n_qubits + convergence time
-python check.py validate                        # every two_designs calibration check
+python check.py validate                        # every calibration check
 python check.py validate --only clifford        # just one, by explicit name...
 python check.py validate --only a               # ...or by short alias, either works
 python check.py validate --only local-random    # another one (alias: b)
@@ -433,12 +442,9 @@ python check.py benchmark --only stress --circuits 1 18 34 --reps 2
 each with an explicit `name` (used everywhere in output and docs) and a
 tuple of `aliases` it can also be called by — short letters like `a`/`b`/`c`
 are there purely for fast typing, never used as the ensemble's actual
-identity in code, file names, or documentation (the design notes this
-project builds on label these "Family A", "Family B", "Family C"; that
-labeling is cross-referenced once in each module's docstring for anyone
-going back to the source, but isn't used as an identifier anywhere in this
-repo — `--only a` is offered as a convenience alias precisely so the terse
-form stays available without making it the primary name). Add a new one by
+identity in code, file names, or documentation (`--only a` is offered as
+a convenience alias precisely so the terse form stays available without
+making it the primary name). Add a new one by
 writing `checks/validate_something.py` with a `main(argv=None)`, then
 adding one entry to `CHECKS`.
 
@@ -471,7 +477,7 @@ then adding one `elif` in `check.py`.
 `check.py` lives at the repo root for the same reason `run.py` does:
 running `python check.py ...` puts the repo root on `sys.path`
 automatically (Python does this for whatever file you invoke directly), so
-`checks/*.py` can `import frame_potential` and `from two_designs... import
+`checks/*.py` can `import frame_potential` and `from extras.something import
 ...` without needing `python -m` or manual `sys.path` edits — which is also
 why none of these are runnable as `python -m checks.validate_clifford`
 anymore; go through `check.py` instead.

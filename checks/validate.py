@@ -1,4 +1,4 @@
-"""Runs the two_designs calibration checks -- each one confirms a specific
+"""Runs the calibration checks -- each one confirms a specific
 ensemble's frame potential matches its known Haar target, so a failure here
 means the estimator (or the ensemble's construction) is broken, not that
 you've found something interesting (the exception is extras/validate_connectivity.py,

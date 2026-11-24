@@ -3,7 +3,7 @@ import functools
 import pennylane as qp
 import torch
 
-from two_designs import haar_reparam
+import haar_reparam
 
 def local_su2(params, wires = None):
     """ 

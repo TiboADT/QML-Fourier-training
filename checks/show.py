@@ -32,7 +32,7 @@ these by default (pass --decimals N to show them):
     python check.py show 34 --n-qubits 6 --reps 2 --mpl
     python check.py show 34 --n-qubits 6 --reps 2 --mpl my_circuit.png
 
-Not covered: the Clifford-group ensemble (two_designs/clifford_group.py).
+Not covered: the Clifford-group ensemble (checks/clifford_group.py).
 It's a stim stabilizer tableau, not a circuit_set-style gate sequence --
 stim.Tableau.to_circuit() is the right tool if you want to look inside one,
 and doesn't need PennyLane at all.

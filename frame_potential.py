@@ -21,10 +21,10 @@ wrappers (via `_circuit_sampler`) around the two functions the estimation
 logic actually lives in, estimate_once_from_sampler and
 estimate_until_converged_from_sampler. Those take any `sampler(batch_size,
 *, device, dtype, generator) -> Tensor[batch_size, d, d]` callable, so any
-ensemble that isn't a circuit_set architecture at all -- e.g. two_designs/'s
-random-Clifford calibration, which has no continuous parameters and no
-PennyLane gates to trace -- gets the exact same accumulation, pooling, and
-confidence-interval machinery for free.
+ensemble that isn't a circuit_set architecture at all -- e.g.
+checks/clifford_group.py's random-Clifford calibration, which has no
+continuous parameters and no PennyLane gates to trace -- gets the exact
+same accumulation, pooling, and confidence-interval machinery for free.
 """
 
 import math
