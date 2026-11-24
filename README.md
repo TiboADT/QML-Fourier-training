@@ -158,7 +158,9 @@ python run.py frame-potential --circuits 1 18 34 --n-qubits 6 --max-params 100 -
 space-separated. `--converge` uses `estimate_until_converged` instead of a
 single batch — that's what you want for real numbers; without it you get
 one batch of `--n-samples` (default `2**n_qubits * t`). `--device` defaults
-to CUDA if available, else CPU; `--out` defaults to `results/frame_potential.csv`.
+to CUDA if available, else CPU; `--out` (default `results/`) is the
+directory `frame_potential.csv` is written to -- same meaning as train's
+`--out`.
 
 `--max-params N` replaces `--reps` (mutually exclusive with it): different
 architectures spend wildly different numbers of trainable parameters per
@@ -502,7 +504,7 @@ diagram's wire lines. Not covered: the Clifford-group ensemble — it's a
 is the right tool if you want to look inside one instead.
 
 Every run appends to the CSV rather than overwriting it, so a sweep can be
-resumed or extended across sessions by pointing `--out` at the same file.
+resumed or extended across sessions by pointing `--out` at the same directory.
 Load it for post-processing with `frame_potential.load_frame_potential()`.
 
 Qubit counts above ~8 get noticeably slower on CPU — the unitary
@@ -551,8 +553,8 @@ resource limits, nothing most HPC job systems (SLURM etc.) give you for free:
   OOM backoff (see `estimate_once_from_sampler`) makes this *recoverable*
   rather than a hard crash, but it's still wasted time. Check `results/logs/*.pid`
   (or `nvidia-smi`) for an already-running job before starting another.
-- **Concurrent runs writing to the *same* `--out` file is a real risk, not
-  just a theoretical one, especially on an NFS-mounted home directory**
+- **Concurrent runs writing to the *same* `--out` directory is a real risk,
+  not just a theoretical one, especially on an NFS-mounted home directory**
   (common on shared clusters) where concurrent small writes aren't
   guaranteed atomic the way they more often are on a local disk. Give
   concurrent runs different `--out` paths.

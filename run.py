@@ -171,15 +171,16 @@ def parse_circuits(values, generic: bool = False):
 def _common_parser():
     """Flags with the same meaning in both `train` and `frame-potential` --
     declared once and shared via `parents=[...]` instead of twice with
-    copied help text. --n-qubits and --out are deliberately NOT here: they
-    take several values in `train` and one in `frame-potential`, and mean
-    a directory vs. a file respectively -- a real inconsistency to
-    reconcile later (see the code review's section 5 "format" item), not
-    one to paper over by forcing them into a shared declaration now. --out
-    keeps its own default here (None) and is resolved to each command's
-    actual default in cmd_train/cmd_frame_potential.
+    copied help text. --n-qubits used to take several values in `train`
+    and only one in `frame-potential`, and --out used to mean a directory
+    in one and a file in the other -- both reconciled (code review,
+    section 5 "format": "same meaning for the same flag") so both flags
+    could move here. --out keeps its own default here (None) and is
+    resolved to each command's own "results/" default in
+    cmd_train/cmd_frame_potential.
     """
     p = argparse.ArgumentParser(add_help=False)
+    p.add_argument("--n-qubits", type=int, nargs="+", default=[6])
     p.add_argument("--circuits", type=str, nargs="+", default=None,
                     help="circuit numbers, e.g. '7' or '1-19' (mixable, space-separated). "
                          "With --generic, each value is a generic_ansatz code instead "
@@ -210,9 +211,9 @@ def _common_parser():
                          "rather than sharing one stateful generator, so draws "
                          "differ from the --n-workers 1 case even at the same --seed")
     p.add_argument("--out", default=None,
-                    help="train: directory for experiments.csv/costs/ (default "
-                         "results/). frame-potential: path to the CSV (default "
-                         "results/frame_potential.csv)")
+                    help="directory for this command's output files (default: "
+                         "results/) -- train writes experiments.csv/costs/ there, "
+                         "frame-potential writes frame_potential.csv there")
     p.add_argument("--notes", default="")
     p.add_argument("--quiet", action="store_true", help="suppress the per-run report")
     p.add_argument("--n-workers", type=int, default=1,
@@ -268,7 +269,6 @@ def _train_one(x, y, arch, n_qubits, layers, reps, max_steps, batch_size, notes,
 def add_train_parser(sub, common):
     p = sub.add_parser("train", parents=[common],
                         help="train circuit_set (or generic_ansatz) architectures on Fourier-series targets")
-    p.add_argument("--n-qubits", type=int, nargs="+", default=[6])
     p.add_argument("--layers", type=int, nargs="+", default=[3],
                     help="number of data-reuploading layers -- stays fixed per sweep "
                          "point even with --max-params (see --max-params); it's the "
@@ -431,7 +431,6 @@ def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
 def add_frame_potential_parser(sub, common):
     p = sub.add_parser("frame-potential", parents=[common],
                         help="estimate F^(t) for circuit_set (or generic_ansatz) architectures")
-    p.add_argument("--n-qubits", type=int, default=6)
     p.add_argument("--t", type=int, nargs="+", default=[2])
     p.add_argument("--n-samples", type=int, default=None,
                     help="samples per batch (default: 2**n_qubits * t -- "
@@ -493,19 +492,24 @@ def cmd_frame_potential(args):
 
     circuits_arg = args.circuits if args.circuits is not None else (["all"] if args.generic else ["1-19"])
     circuits = parse_circuits(circuits_arg, generic=args.generic)
-    out = args.out if args.out is not None else fp.FRAME_POTENTIAL_CSV
+    # --out means the same thing for both subcommands: a directory (train's
+    # own default is "results/" too) -- frame_potential.FRAME_POTENTIAL_CSV
+    # ("frame_potential.csv") is joined onto it, not treated as a full path.
+    out = os.path.join(args.out if args.out is not None else "results/",
+                        os.path.basename(fp.FRAME_POTENTIAL_CSV))
     device = torch.device(args.device) if args.device else fp.get_device()
     dtype = torch.complex64 if args.dtype == "complex64" else torch.complex128
 
     if args.max_params is not None:
         combos = []
-        for num, reps in build_combos(circuits, args.n_qubits, args.max_params, generic=args.generic):
-            combos.extend(product([num], [reps], args.t))
+        for n_qubits in args.n_qubits:
+            for num, reps in build_combos(circuits, n_qubits, args.max_params, generic=args.generic):
+                combos.extend(product([n_qubits], [num], [reps], args.t))
         print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
               f"max_params={args.max_params} t={args.t} converge={args.converge}")
     else:
         reps_list = args.reps if args.reps is not None else [1, 2, 3]
-        combos = list(product(circuits, reps_list, args.t))
+        combos = list(product(args.n_qubits, circuits, reps_list, args.t))
         print(f"device={device} dtype={dtype} circuits={circuits} n_qubits={args.n_qubits} "
               f"reps={reps_list} t={args.t} converge={args.converge}")
 
@@ -519,51 +523,54 @@ def cmd_frame_potential(args):
     shared_generator = (torch.Generator().manual_seed(args.seed)
                         if args.seed is not None and args.n_workers <= 1 else None)
     arg_tuples = [
-        (get_architecture(num, generic=args.generic), args.n_qubits, reps, t, args.converge,
+        (get_architecture(num, generic=args.generic), n_qubits, reps, t, args.converge,
          args.n_samples, args.rel_tol, args.max_batches, device, dtype,
          args.seed if args.n_workers > 1 else None, shared_generator, verbose)
-        for (num, reps, t) in combos
+        for (n_qubits, num, reps, t) in combos
     ]
 
-    # (num, t) pairs where a smaller reps already exhausted --max-batches
-    # without satisfying estimate_until_converged's own stopping rule.
-    # combos is built with reps non-decreasing for any fixed (num, t) (both
-    # branches above sweep reps in increasing order per circuit), so once a
-    # pair lands here every later occurrence is a strictly larger reps --
-    # safe to skip: more reps can only move F^(t) closer to Haar, shrinking
-    # delta further, which only makes the (already unmet) rel_tol*delta
-    # target harder to hit, never easier. Only consulted at --n-workers 1
-    # (see skip_if below and _parallel_map's own docstring) -- at
-    # --n-workers > 1 this still gets populated as results arrive, but
-    # _parallel_map's parallel branch never calls skip_if, so it has no
-    # effect there, matching the documented across-workers limitation.
+    # (num, n_qubits, t) triples where a smaller reps already exhausted
+    # --max-batches without satisfying estimate_until_converged's own
+    # stopping rule. combos is built with reps non-decreasing for any fixed
+    # (num, n_qubits, t) (both branches above sweep reps in increasing
+    # order per circuit), so once a triple lands here every later
+    # occurrence is a strictly larger reps -- safe to skip: more reps can
+    # only move F^(t) closer to Haar, shrinking delta further, which only
+    # makes the (already unmet) rel_tol*delta target harder to hit, never
+    # easier. Only consulted at --n-workers 1 (see skip_if below and
+    # _parallel_map's own docstring) -- at --n-workers > 1 this still gets
+    # populated as results arrive, but _parallel_map's parallel branch
+    # never calls skip_if, so it has no effect there, matching the
+    # documented across-workers limitation.
     stuck = set()
 
     def skip_if(arch, n_qubits, reps, t, *rest):
-        return args.converge and (arch.num, t) in stuck
+        return args.converge and (arch.num, n_qubits, t) in stuck
 
     n_failed = n_skipped = 0
     for i, outcome in _parallel_map(_fp_one, arg_tuples, args.n_workers, skip_if=skip_if):
-        num, reps, t = combos[i]
+        n_qubits, num, reps, t = combos[i]
         if outcome is _SKIPPED:
             n_skipped += 1
-            print(f"[{i + 1}/{n_runs}] skipped: circuit {num} (t={t}) already exhausted "
-                  f"--max-batches={args.max_batches} without converging at a smaller reps -- "
-                  "more reps won't change that, only raising --max-batches would.")
+            print(f"[{i + 1}/{n_runs}] skipped: circuit {num} (n_qubits={n_qubits}, t={t}) "
+                  f"already exhausted --max-batches={args.max_batches} without converging "
+                  "at a smaller reps -- more reps won't change that, only raising "
+                  "--max-batches would.")
             continue
         if isinstance(outcome, Exception):
             n_failed += 1
-            print(f"[{i + 1}/{n_runs}] FAILED circuit {num} reps={reps} t={t}: {outcome!r}")
+            print(f"[{i + 1}/{n_runs}] FAILED circuit {num} n_qubits={n_qubits} reps={reps} "
+                  f"t={t}: {outcome!r}")
             continue
         est, elapsed = outcome
         arch = get_architecture(num, generic=args.generic)
         if args.converge and not est.converged:
-            stuck.add((num, t))
-        fp.save_estimate(est, arch=arch, n_qubits=args.n_qubits, reps=reps,
+            stuck.add((num, n_qubits, t))
+        fp.save_estimate(est, arch=arch, n_qubits=n_qubits, reps=reps,
                           device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=out)
         if not args.quiet:
             print(f"[{i + 1}/{n_runs}] ({elapsed:.1f}s) \n" +
-                  fp.report(est, arch=arch, n_qubits=args.n_qubits, reps=reps))
+                  fp.report(est, arch=arch, n_qubits=n_qubits, reps=reps))
 
     failed_note = f", {n_failed} failed" if n_failed else ""
     skipped_note = f", {n_skipped} skipped (already-doomed convergence)" if n_skipped else ""
