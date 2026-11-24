@@ -1,3 +1,5 @@
+import functools
+
 import pennylane as qp
 import torch
 
@@ -79,12 +81,52 @@ def haar_su2_params(raw):
     return torch.stack([alpha, beta, gamma], dim=1)
 
 
-def _brickwork_layer_pairs(num_wires: int, layer: int) -> int:
+def brickwork_layer_pairs(num_wires: int, layer: int) -> int:
     """How many 2-qubit gates layer `layer` applies in the alternating-offset
-    brickwork (circuits 32/34/36)"""
+    brickwork (circuits 32/33/34, and generic_ansatz's structure=1)."""
     num_pairs = num_wires // 2
     wires_parity = 1 - (num_wires % 2)
     return num_pairs - layer % 2 * wires_parity
+
+
+def _kak1_block(params, wires=None, reparam: bool = False):
+    """Brickwork of KAK1 2-qubit blocks -- circuits 33 (reparam=False) and
+    34 (reparam=True) are the exact same gate structure, differing only in
+    where their angles come from: circuit 33 feeds the raw Uniform(0, 2*pi)
+    params straight into local_su2/core_kak; circuit 34 (reparam=True)
+    sends the local dressings through haar_su2_params and the canonical
+    core's angles through haar_reparam.sample_canonical first, so every
+    2-qubit gate comes out exactly Haar-distributed on SU(4) instead of
+    circuit 33's raw/naive angles.
+
+    params : tensor of shape (num_layers, num_wires//2, 3, 3)
+    [+ optional trailing batch dim], entries Uniform(0, 2*pi) -- same raw
+    convention as every other circuit here.
+    """
+    if wires is None:
+        wires = list(range(params.shape[1] * 2))
+    num_wires = len(wires)
+    num_layers, num_pairs = params.shape[0], params.shape[1]
+    for layer in range(num_layers - 1):
+        layer_pairs = brickwork_layer_pairs(num_wires, layer)
+        layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
+        for i in range(layer_pairs):
+            local_pair = params[layer, i, :2]
+            if reparam:
+                local_pair = haar_su2_params(local_pair)
+            local_su2(local_pair, wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
+        for i in range(layer_pairs):
+            if reparam:
+                u = params[layer, i, 2] / (2 * torch.pi)
+                angles = haar_reparam.sample_canonical(u[0], u[1], u[2])
+            else:
+                angles = params[layer, i, 2]
+            core_kak(*angles, [layer_wires[2 * i], layer_wires[2 * i + 1]])
+    for wire_pair in range(num_pairs):
+        local_pair = params[num_layers - 1, wire_pair, :2]
+        if reparam:
+            local_pair = haar_su2_params(local_pair)
+        local_su2(local_pair, wires=[wires[2 * wire_pair], wires[2 * wire_pair + 1]])
 
 
 def circuit_set(num: int = None):
@@ -515,12 +557,9 @@ def circuit_set(num: int = None):
             if wires is None:
                 wires = list(range(num_wires))
             num_wires = len(wires)
-            num_pairs = num_wires // 2
-            wires_parity = 1 - (num_wires % 2)
-
 
             for layer in range(num_layers):
-                layer_pairs = num_pairs - layer % 2 * wires_parity
+                layer_pairs = brickwork_layer_pairs(num_wires, layer)
                 layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
                 two_rotations(params[layer, : layer_pairs * 2], wires=layer_wires)
                 for i in range(layer_pairs):
@@ -529,71 +568,39 @@ def circuit_set(num: int = None):
         return two_rotations_brickwall
 
     # ------------------------------------------------------------------
-    # Circuit 33: Perfect SU(4) layers Using KAK decomposition (brickwall)
+    # Circuit 33: Perfect SU(4) layers using KAK decomposition (brickwork)
+    # Circuit 34: same gate structure, Haar-reparametrized (see _kak1_block)
     # params shape: (num_layers, num_wires//2, 3, 3)
     # ------------------------------------------------------------------
-
     elif num == 33:
-        def KAK(params, wires = None):
-            """ 
-            params : tenor of shape (num_layers, num_wires//2, 3, 3)
-            """
-            if wires is None:
-                wires = list(range(params.shape[1]*2))
-            num_wires = len(wires)
-            num_layers, num_pairs = params.shape[0], params.shape[1]
-            wires_parity = 1 - (num_wires % 2)
-            for layer in range(num_layers-1):
-                layer_pairs = num_pairs - layer % 2 * wires_parity
-                layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
-                for i in range(layer_pairs):
-                    local_su2(params[layer, i, :2], wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
-                for i in range(layer_pairs):
-                    core_kak(*params[layer, i, 2], [layer_wires[2 * i], layer_wires[2 * i + 1]])
-            for wire_paire in range(num_pairs):
-                local_su2(params[num_layers-1, wire_paire, :2], wires=[wires[2 * wire_paire], wires[2 * wire_paire + 1]])
+        return functools.partial(_kak1_block, reparam=False)
 
-        return KAK
-
-    # ------------------------------------------------------------------
-    # Circuit 34: KAK1 exact-Haar block, brickwork (N qubits)
-    # params shape: (num_layers, num_wires//2, 3, 3)
-    # ------------------------------------------------------------------
     elif num == 34:
-        def kak1_haar(params, wires = None):
-            """params : tensor of shape (num_layers, num_wires//2, 3, 3)
-            [+ optional trailing batch dim], entries Uniform(0, 2*pi) --
-            same raw convention as every other circuit here. Same gate
-            structure as circuit 33, but every local dressing goes through
-            haar_su2_params (haar_reparam.euler_angles) and the canonical
-            core's params go through haar_reparam.sample_canonical first,
-            so the resulting 2-qubit gates are exactly Haar-distributed on
-            SU(4) instead of circuit 33's raw/naive angles.
-            """
-            if wires is None:
-                wires = list(range(params.shape[1]*2))
-            num_wires = len(wires)
-            num_layers, num_pairs = params.shape[0], params.shape[1]
-            wires_parity = 1 - (num_wires % 2)
-            for layer in range(num_layers-1):
-                layer_pairs = num_pairs - layer % 2 * wires_parity
-                layer_wires = wires[layer % 2: layer % 2 + layer_pairs * 2]
-                for i in range(layer_pairs):
-                    local_su2(haar_su2_params(params[layer, i, :2]),
-                              wires=[layer_wires[2 * i], layer_wires[2 * i + 1]])
-                for i in range(layer_pairs):
-                    u = params[layer, i, 2] / (2 * torch.pi)
-                    core_kak(*haar_reparam.sample_canonical(u[0], u[1], u[2]),
-                             [layer_wires[2 * i], layer_wires[2 * i + 1]])
-            for wire_paire in range(num_pairs):
-                local_su2(haar_su2_params(params[num_layers-1, wire_paire, :2]),
-                          wires=[wires[2 * wire_paire], wires[2 * wire_paire + 1]])
-
-        return kak1_haar
+        return functools.partial(_kak1_block, reparam=True)
 
     else:
         raise ValueError(f"Circuit number {num} is not defined.")
     
+
+# width (last axis of the (reps, num_wires, width) weight tensor) per
+# circuit number -- a plain int for a fixed width, or a callable(num_wires)
+# for the handful that scale with it. Circuits 33/34 don't fit this
+# (num_wires//2, not num_wires, is their second axis), so they're handled
+# as a full-shape override in _WEIGHT_SHAPE_OVERRIDES instead.
+_WEIGHT_WIDTH = {
+    1: 2, 2: 2, 3: 3, 4: 3,
+    5: lambda num_wires: 4 + num_wires - 1,
+    6: lambda num_wires: 4 + num_wires - 1,
+    7: 6, 8: 6, 9: 1, 10: 1,
+    11: 4, 12: 4, 13: 4, 14: 4,
+    15: 2, 16: 3, 17: 3, 18: 3, 19: 3,
+    30: 3, 32: 2,
+}
+_WEIGHT_SHAPE_OVERRIDES = {
+    33: lambda num_wires, reps: (reps, num_wires // 2, 3, 3),
+    34: lambda num_wires, reps: (reps, num_wires // 2, 3, 3),
+}
+
 
 def weight_tensor_shape(num, num_wires, reps = 1):
     """
@@ -601,52 +608,14 @@ def weight_tensor_shape(num, num_wires, reps = 1):
     For a generic_ansatz code, use architectures.Architecture.weight_shape
     instead of this function directly.
     """
-    if num == 1:
-        return (reps, num_wires, 2)
-    elif num == 2:
-        return (reps, num_wires, 2)
-    elif num == 3:
-        return (reps, num_wires, 3)
-    elif num == 4:  
-        return (reps, num_wires, 3)
-    elif num == 5:
-        return (reps, num_wires, 4 + num_wires - 1)
-    elif num == 6:
-        return (reps, num_wires, 4 + num_wires - 1)
-    elif num == 7:
-        return (reps, num_wires, 6)
-    elif num == 8:
-        return (reps, num_wires, 6)
-    elif num == 9:
-        return (reps, num_wires, 1)
-    elif num == 10:
-        return (reps, num_wires, 1)
-    elif num == 11:
-        return (reps, num_wires, 4)
-    elif num == 12:
-        return (reps, num_wires, 4)
-    elif num == 13:
-        return (reps, num_wires, 4)
-    elif num == 14:
-        return (reps, num_wires, 4)
-    elif num == 15:
-        return (reps, num_wires, 2)
-    elif num == 16:
-        return (reps, num_wires, 3)
-    elif num == 17:
-        return (reps, num_wires, 3)
-    elif num == 18:
-        return (reps, num_wires, 3)
-    elif num == 19:
-        return (reps, num_wires, 3)
-    elif num == 30:
-        return (reps, num_wires, 3)
-    elif num == 33 or num == 34:
-        return (reps, num_wires//2, 3, 3)
-    elif num == 32:
-        return (reps, num_wires, 2)
-    else:
+    if num in _WEIGHT_SHAPE_OVERRIDES:
+        return _WEIGHT_SHAPE_OVERRIDES[num](num_wires, reps)
+    if num not in _WEIGHT_WIDTH:
         raise ValueError(f"Circuit number {num} is not defined.")
+    width = _WEIGHT_WIDTH[num]
+    if callable(width):
+        width = width(num_wires)
+    return (reps, num_wires, width)
 
 
 def n_trainable(num, num_wires, reps=1):

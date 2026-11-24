@@ -30,7 +30,7 @@ confidence-interval machinery for free.
 import math
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Callable, Optional
 
@@ -54,10 +54,17 @@ class Estimate:
     """One (possibly pooled) Monte Carlo estimate of F^(t).
 
         'total'/'sum_sq' are the raw Σ|Tr(Ui†Uj)|^(2t) / Σ|Tr(Ui†Uj)|^(4t) sums
-        over n_pairs pairs — additive across independent batches. 
+        over n_pairs pairs — additive across independent batches.
         'variance' is the *unbiased* variance of `frame_potential`
         'n_pairs' is the number of independent pairs contributing to this estimate.
         't'/'d' are the frame potential order and Hilbert space dimension.
+        'converged' is None for a plain estimate_once(_from_sampler) result
+        (no stopping rule was ever evaluated); estimate_until_converged
+        (_from_sampler) sets it to whether its own stopping rule was
+        actually satisfied before max_batches ran out -- callers read this
+        instead of re-deriving the same rel_tol*|delta| check themselves
+        (three places used to: here, run.py's _converged, and
+        extras/validate_local_random.py's check_convergence_pathology).
 
     __add__ pools it correctly across batches (as an n_k-weighted average of
     independent-batch variances) rather than re-deriving a fresh naive one
@@ -69,6 +76,7 @@ class Estimate:
     n_pairs: int
     t: int
     d: int
+    converged: Optional[bool] = None
 
     @property
     def frame_potential(self) -> float:
@@ -247,11 +255,16 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
         max_batch_size = min(max_batch_size, achieved)
         n_samples = achieved
 
-    for i in range(max_batches):
+    def _converged(est):
         target = abs(rel_tol * est.delta)
-        if est.fidelity_error <= target or est.fidelity_error <= min_abs_error:
+        return est.fidelity_error <= target or est.fidelity_error <= min_abs_error
+
+    converged = _converged(est)
+    for i in range(max_batches):
+        if converged:
             break
         if verbose:
+            target = abs(rel_tol * est.delta)
             print(f"  batch {i}: F={est.frame_potential:.4f} error={est.fidelity_error:.4f} "
                   f"target={target:.4f} n_pairs={est.n_pairs}")
         n_samples = min(n_samples * 2, max_batch_size)
@@ -262,8 +275,9 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
             max_batch_size = min(max_batch_size, achieved)
             n_samples = achieved
         est = est + new_est
+        converged = _converged(est)
 
-    return est
+    return replace(est, converged=converged)
 
 
 def _circuit_sampler(arch: Architecture, n_qubits: int, reps: int) -> Sampler:

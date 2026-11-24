@@ -80,6 +80,8 @@ from dataclasses import dataclass
 
 import pennylane as qp
 
+import circuits
+
 
 # ── decoding ────────────────────────────────────────────────────────────
 
@@ -254,9 +256,7 @@ def entangling_pairs(spec: GenericSpec, num_wires: int, rep: int) -> list[tuple[
         return [(i, i + 1) for i in range(num_wires - 1)]
 
     if spec.structure == 1:  # brickwork
-        num_pairs = num_wires // 2
-        wires_parity = 1 - (num_wires % 2)
-        layer_pairs = num_pairs - rep % 2 * wires_parity
+        layer_pairs = circuits.brickwork_layer_pairs(num_wires, rep)
         offset = rep % 2
         return [(offset + 2 * i, offset + 2 * i + 1) for i in range(layer_pairs)]
 

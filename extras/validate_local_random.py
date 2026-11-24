@@ -45,7 +45,7 @@ def check_single_block(n_samples=8000, ts=(1, 2, 3)):
     reps=2, not 1: circuit 34's main loop runs range(reps-1) repetitions,
     each applying a dressing-and-core (even layer) or nothing at all (odd
     layer, zero gates at this qubit count -- see
-    circuits._brickwork_layer_pairs's alternation), followed by one
+    circuits.brickwork_layer_pairs's alternation), followed by one
     closing dressing-only layer. reps=1 runs the main loop zero times, so
     it is just that closing dressing: a product of disconnected Haar-SU(2)
     rotations, no entangling core at all. reps=2 is the smallest value
@@ -100,7 +100,7 @@ def check_convergence_pathology(n_qubits=2, reps=2, t=2, rel_tol=0.3, max_batche
                                        dtype=torch.complex128)
     elapsed = time.time() - t0
     target = abs(rel_tol * est.delta)
-    converged = est.fidelity_error <= target or est.fidelity_error <= 1e-5
+    converged = est.converged
     within_ci = abs(est.delta) <= max(est.fidelity_error, 1e-9)
     print(f"  t={t}  F={est.frame_potential:.4f}  Haar={est.haar:.1f}  delta={est.delta:+.4f}  "
           f"95% CI +/-{est.fidelity_error:.4f}  "

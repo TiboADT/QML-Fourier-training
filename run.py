@@ -371,6 +371,13 @@ def cmd_train(args):
 
 # ── frame-potential ─────────────────────────────────────────────────────
 
+def default_frame_potential_n_samples(n_qubits: int, t: int) -> int:
+    """The single-batch (--converge not given) default sample count, named
+    so --n-samples' help string and _fp_one's own fallback share one
+    formula instead of two copies that could drift apart."""
+    return 2 ** n_qubits * t
+
+
 def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
             device, dtype, seed=None, generator=None, verbose=False):
     """One (circuit, reps, t) frame-potential estimate -- module-level and
@@ -415,7 +422,7 @@ def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
             device=device, dtype=dtype, generator=generator, verbose=verbose,
         )
     else:
-        n = n_samples or (2 ** n_qubits * t)
+        n = n_samples or default_frame_potential_n_samples(n_qubits, t)
         est = _fp.estimate_once(arch, n_qubits, reps, t, n,
                                  device=device, dtype=dtype, generator=generator)
     return est, _time.time() - t0
@@ -427,7 +434,8 @@ def add_frame_potential_parser(sub, common):
     p.add_argument("--n-qubits", type=int, default=6)
     p.add_argument("--t", type=int, nargs="+", default=[2])
     p.add_argument("--n-samples", type=int, default=None,
-                    help="samples per batch (default: 2**n_qubits * t)")
+                    help="samples per batch (default: 2**n_qubits * t -- "
+                         "see default_frame_potential_n_samples)")
     p.add_argument("--converge", action="store_true",
                     help="keep pooling batches until the 95%% CI is tight (see --rel-tol); "
                          "default is a single batch of --n-samples. With --n-workers > 1, "
@@ -476,18 +484,6 @@ def reps_for_param_budget(arch, n_qubits, max_params, multiplier=1):
         prev_n = n
         reps += 1
     return reps_list
-
-
-def _converged(est, rel_tol, min_abs_error=1e-5):
-    """Re-derive whether estimate_until_converged's own stopping criterion
-    was actually satisfied -- it returns only the final (possibly
-    max_batches-exhausted) Estimate, not a flag saying which happened.
-    Same formula as extras/validate_local_random.py's
-    check_convergence_pathology; min_abs_error matches
-    estimate_until_converged's own default since run.py doesn't expose
-    that one as a flag."""
-    target = abs(rel_tol * est.delta)
-    return est.fidelity_error <= target or est.fidelity_error <= min_abs_error
 
 
 def cmd_frame_potential(args):
@@ -561,7 +557,7 @@ def cmd_frame_potential(args):
             continue
         est, elapsed = outcome
         arch = get_architecture(num, generic=args.generic)
-        if args.converge and not _converged(est, args.rel_tol):
+        if args.converge and not est.converged:
             stuck.add((num, t))
         fp.save_estimate(est, arch=arch, n_qubits=args.n_qubits, reps=reps,
                           device=device, dtype=dtype, seed=args.seed, notes=args.notes, path=out)
