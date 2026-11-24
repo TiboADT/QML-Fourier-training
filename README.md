@@ -117,10 +117,12 @@ full flag list.
 sampling many random-parameter unitaries and averaging `|Tr(Ui†Uj)|^(2t)`
 over pairs. It's built from four pieces:
 
-- `sample_unitaries(num, n_qubits, reps, batch_size, device=..., dtype=...)`
-  — the batched unitary construction. Traces `circuit_set(num)`'s gate
-  sequence once (via PennyLane's own queuing/tape mechanism, so it's always
-  in sync with the circuit actually used for training) and applies each
+- `sample_unitaries(arch, n_qubits, reps, batch_size, device=..., dtype=...)`
+  (lives in `simulation.py`, re-exported from `frame_potential` for
+  backward compatibility) — the batched unitary construction. Traces
+  `arch`'s gate sequence once (via PennyLane's own queuing/tape mechanism,
+  so it's always in sync with the circuit actually used for training) and
+  applies each
   gate to the whole batch via a reshape + axis-contraction, not a full
   kron(I, gate, I) + matmul — `O(batch * d^2)` per gate instead of
   `O(batch * d^3)`, plus fusing consecutive same-wire single-qubit gates
