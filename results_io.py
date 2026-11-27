@@ -1,12 +1,7 @@
 """Shared CSV-append infrastructure for frame_potential.py and
 tracking.py: both append one row per run to a CSV, creating it
 with a header if missing, and both need the commit that produced a row
-traceable later. Previously duplicated -- frame_potential.save_estimate
-had its own inline writer, tracking.py its own
-_ensure_csv/_append_row, doing the exact same thing -- unified here, with
-a header-mismatch check added (code review, "must fix": local CSVs were
-found column-shifted after fields were added to a field list but not to
-already-written headers, with nothing catching it).
+traceable later.
 """
 
 import csv
@@ -16,8 +11,6 @@ from pathlib import Path
 
 
 def git_commit_hash() -> str:
-    """So a saved row can always be traced back to the code that produced
-    it -- "unknown" outside a git repo or with no commits."""
     try:
         return subprocess.check_output(
             ["git", "rev-parse", "HEAD"],
@@ -42,10 +35,7 @@ def ensure_csv(path: str, fieldnames: list) -> None:
 def append_row(path: str, fieldnames: list, row: dict) -> None:
     """Append one row to `path`, creating it with a header if it doesn't
     exist yet. Raises if the file already exists with a DIFFERENT header
-    than `fieldnames` -- silently writing a row under the wrong columns
-    (what plain appending does) is exactly how the column-shifted CSVs
-    this review found happened: fields were added to a field list without
-    updating already-written files, and nothing caught it."""
+    than `fieldnames`"""
     directory = os.path.dirname(path)
     if directory:
         os.makedirs(directory, exist_ok=True)

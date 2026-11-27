@@ -8,8 +8,6 @@ from architectures import Architecture
 # ── Training and cost functions ───────────────────────────────────────────────
 
 def square_loss(targets, predictions):
-    # same quantity as the loop-over-pairs version this replaced; only
-    # last-digit float rounding differs.
     return 0.5 * ((targets - predictions) ** 2).mean()
 
 
@@ -32,7 +30,7 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
         y_batch = target_y[perm[:batch_size]]
 
         # update the weights by one optimizer step, and record that step's
-        # own (pre-update) batch loss -- already computed, nothing more to do
+        # own (pre-update) batch loss
         loss = opt.step(closure)
         cst[step] = loss.detach()
 

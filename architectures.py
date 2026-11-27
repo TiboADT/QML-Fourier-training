@@ -1,10 +1,5 @@
 """Architecture: one small object bundling a circuit_set number (or
-generic_ansatz code) with whether it's generic, so every function that
-needs to build/size a circuit takes one argument instead of a hand-passed
-(num, generic) pair threaded through separately. Previously repeated
-across run.py, frame_potential.py, tracking.py, training.py,
-and checks/show.py (code review, "proposed organisation" -> "one
-architecture interface").
+generic_ansatz code) with whether it's generic, to simplify the interface to the rest of the code.
 """
 
 from dataclasses import dataclass

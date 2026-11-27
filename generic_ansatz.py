@@ -1,8 +1,7 @@
-"""Generic, numerically-encoded ansatz builder -- a parallel path to
-circuits.py's hardcoded circuit_set(1-34), for assembling new
+"""Generic, numerically-encoded ansatz builder for assembling new
 (rotation, entanglement) combinations from a small set of axes instead of
-hand-writing a new circuit_set branch per combination. Circuits 1-34 are
-untouched; this is reached via architectures.Architecture(num=CODE,
+hand-writing a new circuit_set branch per combination. 
+This is reached via architectures.Architecture(num=CODE,
 generic=True) (its .build/.weight_shape/.n_trainable dispatch here instead
 of to circuits.py).
 
@@ -40,38 +39,13 @@ A 5-digit decimal code, read most- to least-significant digit:
     parametrized: 0=CRX, 1=CRY, 2=CRZ             (3-9 reserved)
                   wires=[w1, w0] (control=w1, target=w0)
 
-Deliberately out of scope here: composite/KAK-style entanglers, and
-range-limited connectivity (needs an actual int parameter, doesn't fit a
-single digit).
-
 Design
 ------
-Every repetition is exactly one (rotation, entanglement) pair -- there is
-no separate "shift" axis and no variable-length per-repetition sequence.
-What looks like "sandwich" or "interleaved" structure in circuits 5-17 is
-just this same pair repeated more times, with the entangler's wiring
-changing between repetitions according to `structure` (brickwork
-alternates even/odd; circular alternating alternates forward/backward) --
-that alternation is *part of* what the structure name means, not an
-independent choice layered on top of it.
-
-A wire is only rotated in a given repetition if that repetition's
-entangling pass actually touches it. This is a no-op for every structure
-except brickwork (the only one where some wires -- the boundary
-ones -- sit idle on alternating repetitions): a wire idle this repetition
-already carries a valid, unconsumed rotation from whenever it was last
-dressed, so re-dressing it would be wasted. For 3-axis rotations this is
-provably lossless (SU(2) is a group: two consecutive rotations with
-nothing between them collapse to one); for 1/2-axis rotations it isn't a
-strict mathematical identity, but it is what keeps a wire's rotation
-count matched to how often it's actually entangled, which is the point.
-
+Every repetition is exactly one (rotation, entanglement) pair.
+(A wire is only rotated in a given repetition if that repetition's
+entangling pass actually touches it.)
 There is always exactly one closing rotation layer, touching every wire,
-after the last repetition's entangling gates, with nothing after it. For
-connectivity == "none" this collapses the whole ansatz to a single
-rotation layer regardless of how many repetitions are requested -- the
-same rule, no special-casing, since there's never an entangling pass to
-qualify any wire in the repeated part.
+after the last repetition's entangling gates, with nothing after it.
 """
 
 from __future__ import annotations
@@ -114,9 +88,6 @@ class GenericSpec:
 _FIXED_GATES = {0: qp.CNOT, 1: qp.CZ}
 _PARAM_GATES = {0: qp.CRX, 1: qp.CRY, 2: qp.CRZ}
 
-# Paper vocabulary (Table 1) for the `structure` digit -- meaningful only
-# when connectivity == 1 (local). 0 and 4 aren't in Table 1; named here for
-# completeness only.
 STRUCTURE_NAMES = {
     0: "sequential",
     1: "brickwork",
@@ -178,10 +149,7 @@ def decode(code: int) -> GenericSpec:
 
 
 def get_architecture_from_code(code: int) -> int:
-    """The 2-digit (connectivity, structure) group a code belongs to --
-    e.g. 21110 and 21111 (differing only in gate) both give 11. Collapses
-    rotation arity and gate choice, isolating how *topology* alone affects
-    something (see architecture_label for the readable name)."""
+    """The 2-digit (connectivity, structure) group a code belongs to."""
     return (code // 100) % 100
 
 
@@ -207,13 +175,6 @@ def list_architectures(unique: bool = False) -> list[int]:
     the exact same architecture. This instead fixes those don't-care
     digits at their single representative value (0), so every code in the
     returned list is distinct *by its digits*.
-
-    unique=True additionally drops EQUIVALENT's keys and all of
-    NO_ENTANGLEMENT -- codes that are digit-distinct but build the exact
-    same circuit as another code already in the list (93 -> 87). The
-    default (False, 93 codes) is what every existing sweep already uses;
-    changing it would silently change what --circuits all/--generic sweeps
-    without --circuits.
     """
     codes = []
     #  add the no-topology, no-gate option first (rotation-only, any rotation arity)
@@ -319,14 +280,9 @@ def _layer_cost(spec: GenericSpec, num_wires: int, rep: int) -> int:
 
 
 def weight_tensor_shape(code: int, num_wires: int, reps: int = 1) -> tuple:
-    """params shape: (reps + 1, num_wires, width)
-
-    For all-to-all topology, width's entangler_cols = num_wires - 1: each
-    wire w0 is the first element of exactly num_wires - 1 ordered pairs
-    (one per other wire -- see entangling_pairs's connectivity == 2
-    branch), so build()'s per-wire cp_idx_by_wire counter cycles through
-    exactly 0..num_wires-2 for that wire: one write per allocated column,
-    no collision and nothing left unused.
+    """
+    Return the shape of the weight tensor for a given code.
+    params shape: (reps + 1, num_wires, width)
     """
     spec = decode(code)
     if spec.connectivity == 0:
@@ -352,14 +308,7 @@ def build(code: int, params, wires=None):
         touched = sorted({w for pair in pairs for w in pair})
         for w in touched:
             _apply_rotation(spec, params[rep, w, :spec.rotation], wires[w])
-        # see _apply_entangler's docstring: circular-sequential's backward
-        # pass (structure 3, odd rep) is the one case that does NOT swap
-        # which wire is control vs target.
         swap = not (spec.structure == 3 and rep % 2 == 1)
-        # each pair's parameter lives at its first wire's entangler
-        # column(s) -- cp_idx_by_wire counts up per wire so all-to-all's
-        # num_wires-1 pairs per wire land on distinct columns (see
-        # weight_tensor_shape's docstring for the no-collision argument).
         cp_idx_by_wire = {}
         for (w0, w1) in pairs:
             cp_idx = cp_idx_by_wire.get(w0, 0)

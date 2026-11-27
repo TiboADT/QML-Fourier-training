@@ -22,8 +22,7 @@ Compare architectures at a matched parameter budget instead of matched reps
 would exceed the budget):
     python run.py frame-potential --circuits 1 18 34 --n-qubits 6 --max-params 100 --t 2
 
-Sweep every non-redundant generic_ansatz architecture (see
-generic_ansatz.list_architectures()) instead of the hardcoded circuit_set
+Sweep every non-redundant generic_ansatz architecture, instead of the hardcoded circuit_set
 numbers -- pass --generic, and --circuits all to use every one of them
 (the default when --generic is given with no --circuits):
     python run.py frame-potential --generic --n-qubits 6 --reps 1 2 3 --t 2
@@ -62,8 +61,7 @@ def _parallel_map(fn, arg_tuples, n_workers, skip_if=None):
     """Apply fn(*args) for each args in arg_tuples, yielding (original_index,
     result) pairs as they complete (not necessarily in submission order --
     see concurrent.futures.as_completed). n_workers <= 1 runs sequentially
-    in this process instead (today's single-worker behavior/ordering, no
-    pool overhead).
+    in this process instead.
 
     Key decisions, not just today's behavior (see git history for the
     debugging story behind each): processes, not threads, since the GIL
@@ -86,8 +84,7 @@ def _parallel_map(fn, arg_tuples, n_workers, skip_if=None):
     lets a caller skip a task based on an earlier task's own outcome within
     this same run, yielding `_SKIPPED` in place of a result -- not checked
     when n_workers > 1, since parallel workers have no visibility into
-    sibling workers' outcomes (see cmd_frame_potential's `stuck` set for
-    why that asymmetry is accepted there, not an oversight here).
+    sibling workers' outcomes.
     """
     if n_workers <= 1:
         for i, args_tuple in enumerate(arg_tuples):
@@ -114,19 +111,13 @@ def _parallel_map(fn, arg_tuples, n_workers, skip_if=None):
 def build_combos(circuits, n_qubits, max_params, multiplier=1, generic=False):
     """For each circuit in `circuits`, the (num, reps) pairs (reps possibly
     repeated per num) whose multiplier * n_trainable stays within
-    max_params -- see reps_for_param_budget, which does the actual
-    per-circuit search. The caller combines this with whatever OTHER axes
+    max_params. The caller combines this with whatever OTHER axes
     it sweeps (t for frame-potential; n_qubits/layers for train, which
     calls this once per (n_qubits, layers) pair, passing that layers value
     as `multiplier`).
 
     Prints a progress line per circuit and a skip message for any circuit
-    where even reps=1 is already over budget: building this sweep calls
-    n_trainable (a real PennyLane forward+backward pass) once per reps
-    value tried, per circuit, which for a long --circuits list (e.g.
-    --generic with no --circuits, sweeping every architecture) can take
-    tens of seconds with nothing else printed yet -- indistinguishable
-    from a hang without this.
+    where even reps=1 is already over budget.
     """
     combos = []
     for i, num in enumerate(circuits, start=1):
@@ -170,14 +161,7 @@ def parse_circuits(values, generic: bool = False):
 
 def _common_parser():
     """Flags with the same meaning in both `train` and `frame-potential` --
-    declared once and shared via `parents=[...]` instead of twice with
-    copied help text. --n-qubits used to take several values in `train`
-    and only one in `frame-potential`, and --out used to mean a directory
-    in one and a file in the other -- both reconciled (code review,
-    section 5 "format": "same meaning for the same flag") so both flags
-    could move here. --out keeps its own default here (None) and is
-    resolved to each command's own "results/" default in
-    cmd_train/cmd_frame_potential.
+    declared once and shared via `parents=[...]`.
     """
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--n-qubits", type=int, nargs="+", default=[6])
@@ -305,10 +289,7 @@ def cmd_train(args):
     out = args.out if args.out is not None else "results/"
 
     if args.max_params is not None:
-        # layers stays fixed per sweep point (the outer loop below); only
-        # reps is budget-driven -- see reps_for_param_budget's docstring
-        # for why layers is the multiplier rather than another
-        # budget-swept dimension.
+        # layers stays fixed per sweep point (the outer loop below); only reps is budget-driven
         combos = []
         for n_qubits in args.n_qubits:
             for layers in args.layers:
@@ -329,11 +310,8 @@ def cmd_train(args):
 
     # Build the full flat work list up front -- (x, y) per (degree, fn_i) is
     # shared across every combo trained on it (so all architectures for one
-    # target draw are compared fairly), generated once here rather than
-    # per-combo. `meta` carries the (degree, fn_i, n_qubits, layers, reps,
-    # num) label for each item, same indexing as `arg_tuples`, since the
-    # worker function itself doesn't need degree/fn_i (only used for the
-    # printed label) -- see _parallel_map/_train_one.
+    # target draw are compared fairly), generated once here rather than per-combo
+
     meta = []
     arg_tuples = []
     for degree in args.degrees:
@@ -372,20 +350,14 @@ def cmd_train(args):
 # ── frame-potential ─────────────────────────────────────────────────────
 
 def default_frame_potential_n_samples(n_qubits: int, t: int) -> int:
-    """The single-batch (--converge not given) default sample count, named
-    so --n-samples' help string and _fp_one's own fallback share one
-    formula instead of two copies that could drift apart."""
+    """The single-batch (--converge not given) default sample count"""
     return 2 ** n_qubits * t
 
 
 def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
             device, dtype, seed=None, generator=None, verbose=False):
     """One (circuit, reps, t) frame-potential estimate -- module-level and
-    self-contained so it can be sent to a worker process by _parallel_map
-    (see _train_one's docstring for why). Already pure compute with no file
-    I/O of its own -- fp.estimate_once/estimate_until_converged never
-    touched disk, only the fp.save_estimate call in cmd_frame_potential
-    does, which stays in the main process.
+    self-contained so it can be sent to a worker process by _parallel_map.
 
     Exactly one of seed/generator is meaningful. At --n-workers 1,
     cmd_frame_potential passes the SAME `generator` object (not picklable,
@@ -393,15 +365,7 @@ def _fp_one(arch, n_qubits, reps, t, converge, n_samples, rel_tol, max_batches,
     it keeps advancing across the whole sweep, exactly as a single
     sequential loop always has. At --n-workers > 1, it passes `seed`
     instead (a plain int, picklable) and leaves `generator` None, so each
-    worker builds its own fresh one here -- a shared, evolving generator
-    object cannot cross a process boundary at all, so this is not a
-    duplicated-vs-unified-code-path question, it's a real constraint;
-    draws at --n-workers > 1 do not reproduce the --n-workers 1 case even
-    at the same --seed (same caveat cmd_train's --seed help already makes).
-
-    verbose should only ever be True at --n-workers 1: concurrent workers'
-    prints would interleave into garbage, so cmd_frame_potential passes
-    False whenever --n-workers > 1 regardless of --quiet.
+    worker builds its own fresh one here
 
     GPU note: if --device cuda, every worker process opens its own CUDA
     context on the *same* GPU -- several of them competing for one GPU's
@@ -450,28 +414,11 @@ def add_frame_potential_parser(sub, common):
 
 def reps_for_param_budget(arch, n_qubits, max_params, multiplier=1):
     """All reps = 1, 2, 3, ... whose multiplier * arch.n_trainable(n_qubits,
-    reps) stays at or under max_params -- not the raw allocated
-    weight-tensor size (several circuits don't read all of it, see
-    n_trainable's own docstring), so circuits compared at the same
-    max_params are matched on real degrees of freedom. Returns the full
-    list (not just the largest reps) so a sweep shows how F^(t) (or the
-    training cost) evolves with depth up to the budget, not just the
-    endpoint. Empty if even reps=1 already exceeds max_params.
+    reps) stays at or under max_params.
+    Empty if even reps=1 already exceeds max_params.
 
-    `multiplier` is 1 for frame-potential (no layers concept there -- see
-    frame_potential.sample_unitaries, it's just circuit_set(num, reps)) and
-    `layers` for training (build_model stacks `layers` independent copies
-    of the same reps-parametrized block, each with its own weights -- see
-    tracking.py's n_params = layers * n_trainable(...) -- so the
-    *total* trainable-parameter count a training run actually has is that
-    product, not n_trainable alone).
-
-    Some generic_ansatz codes (connectivity=0 -- no entangling topology at
-    all, e.g. 20000) deliberately collapse to the same fixed-size single
-    rotation layer for *every* reps (see generic_ansatz's module docstring),
-    so n_trainable never grows and never exceeds max_params -- without the
-    plateau check below this would loop forever instead of stopping once
-    increasing reps stops changing anything."""
+    `multiplier` is 1 for frame-potential (no layers concept there).
+    """
     reps_list = []
     reps = 1
     prev_n = None
@@ -492,11 +439,10 @@ def cmd_frame_potential(args):
 
     circuits_arg = args.circuits if args.circuits is not None else (["all"] if args.generic else ["1-19"])
     circuits = parse_circuits(circuits_arg, generic=args.generic)
-    # --out means the same thing for both subcommands: a directory (train's
-    # own default is "results/" too) -- frame_potential.FRAME_POTENTIAL_CSV
-    # ("frame_potential.csv") is joined onto it, not treated as a full path.
+
     out = os.path.join(args.out if args.out is not None else "results/",
                         os.path.basename(fp.FRAME_POTENTIAL_CSV))
+    
     device = torch.device(args.device) if args.device else fp.get_device()
     dtype = torch.complex64 if args.dtype == "complex64" else torch.complex128
 
@@ -517,9 +463,8 @@ def cmd_frame_potential(args):
     t0 = time.time()
     verbose = args.n_workers <= 1 and not args.quiet
     # One shared, evolving generator for the whole sweep at --n-workers 1
-    # (exactly like a single sequential loop always has -- see _fp_one's
-    # docstring for why --n-workers > 1 can't share this and uses `seed`
-    # instead); it runs in-process so never needs to be picklable.
+    # (exactly like a single sequential loop always has)
+    # it runs in-process so never needs to be picklable.
     shared_generator = (torch.Generator().manual_seed(args.seed)
                         if args.seed is not None and args.n_workers <= 1 else None)
     arg_tuples = [
@@ -537,11 +482,8 @@ def cmd_frame_potential(args):
     # occurrence is a strictly larger reps -- safe to skip: more reps can
     # only move F^(t) closer to Haar, shrinking delta further, which only
     # makes the (already unmet) rel_tol*delta target harder to hit, never
-    # easier. Only consulted at --n-workers 1 (see skip_if below and
-    # _parallel_map's own docstring) -- at --n-workers > 1 this still gets
-    # populated as results arrive, but _parallel_map's parallel branch
-    # never calls skip_if, so it has no effect there, matching the
-    # documented across-workers limitation.
+    # easier. Only consulted at --n-workers 1
+    
     stuck = set()
 
     def skip_if(arch, n_qubits, reps, t, *rest):

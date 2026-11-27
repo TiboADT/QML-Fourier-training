@@ -39,12 +39,6 @@ EXPERIMENTS_FIELDS = [
 
 def load_experiments(experiments_csv: str = EXPERIMENTS_CSV, path: str = None):
     """Return all experiment summary rows as a list of dicts.
-
-    Files written before the ansatz_reps/git_commit/seed rename+additions
-    have neither git_commit/seed nor the anzats_reps spelling -- rows from
-    those are normalized here (anzats_reps renamed in place; git_commit/
-    seed left absent rather than backfilled with a guess) so every caller
-    sees one consistent column name regardless of which file it came from.
     """
     if path is not None:
         experiments_csv = os.path.join(path, experiments_csv)
@@ -127,18 +121,10 @@ def run_training(
     notes: str = "",
     seed: "Optional[int]" = None,
 ) -> TrainingResult:
-    """Build the model and run `train` -- pure compute, no file I/O. Split
-    out of train_and_record so the expensive part (this) can run in a
-    parallel worker process while a single, non-concurrent caller does all
-    the disk writing afterward (record_training) -- concurrent appends to
-    the same experiments.csv from multiple OS processes aren't safe, so
-    only ever call record_training from one process at a time against a
-    given `path`. See run.py's `--n-workers` for the parallel caller.
+    """Build the model and run `train` (pure compute, no file I/O).
 
     `seed` is carried through to the recorded row only -- it is not used
-    here to seed anything (run.py's cmd_train seeds the global generator
-    once for the whole sweep before any run starts, see its own --seed
-    help), so every run recorded from one sweep shares the same value.
+    here to seed anything, so every run recorded from one sweep shares the same value.
     """
     model, weights = build_model(arch, n_qubits, layers, ansatz_reps,
                                   measuring_qubit=n_qubits - 1)
@@ -157,15 +143,10 @@ def run_training(
         n_qubits=n_qubits,
         layers=layers,
         ansatz_reps=ansatz_reps,
-        # weight_tensor_shape allocates a rectangular tensor, but several
-        # circuits don't read all of it — count what's
-        # actually trainable rather than the raw tensor size.
         n_params=layers * arch.n_trainable(n_qubits, ansatz_reps),
         n_train_samples=len(x),
         max_steps=max_steps,
         batch_size=batch_size,
-        # How many times the (simulated) quantum circuit's expectation value
-        # was actually estimated over the whole run.
         n_expvals=getattr(model, "n_expvals", None),
         final_weights=final_weights,
         cst=cst,
@@ -179,10 +160,8 @@ def record_training(
     experiments_csv: str = EXPERIMENTS_CSV,
     path: str = "results/",
 ) -> str:
-    """Persist a TrainingResult (from run_training, possibly computed in a
-    different process) to experiments.csv and costs/{id}.npy. See
-    run_training's docstring for why this is a separate call -- only call
-    this from one process at a time against a given `path`.
+    """Persist a TrainingResult to experiments.csv and costs/{id}.npy. 
+    only call this from one process at a time against a given `path`.
 
     Returns
     -------
@@ -209,9 +188,7 @@ def record_training(
         "max_steps":        result.max_steps,
         "batch_size":       result.batch_size,
         "n_expvals":        result.n_expvals,
-        # cst[0]/cst[-1]: the first/last step's own (pre-update) batch loss --
-        # see train()'s docstring for why it's the batch loss, not a separate
-        # full-dataset evaluation.
+        # cst[0]/cst[-1]: the first/last step's own (pre-update) batch loss
         "initial_cost":     round(float(cst[0].item()), 8),
         "final_cost":       round(float(cst[-1].item()), 8),
         "seed":             result.seed,
@@ -219,8 +196,6 @@ def record_training(
     }
     results_io.append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
 
-    # cst holds every one of the max_steps optimizer steps' own batch loss --
-    # no separate pre-training slot to skip any more (see train()'s docstring).
     save_cost_curve(experiment_id, cst.detach().numpy(), path=path)
 
     print(f"[tracker] Experiment {experiment_id} saved "
@@ -247,9 +222,8 @@ def train_and_record(
 ):
     """
     Run `run_training` then `record_training` -- the single-call,
-    single-process convenience most callers want. See their own docstrings
-    for the parallel-friendly split (run.py's `--n-workers` uses it
-    directly instead of this wrapper).
+    single-process convenience most callers want. 
+    run.py's `--n-workers` uses the funtion insted of this wrapper.
 
     Returns
     -------

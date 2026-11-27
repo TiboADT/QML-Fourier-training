@@ -72,9 +72,8 @@ def core_kak(tz, ty1, ty2, wires):
 
 def haar_su2_params(raw):
     """raw: (num_wires, 3) or (num_wires, 3, batch) tensor, entries
-    Uniform(0, 2*pi) -- the convention every circuit here uses for its raw
-    params -- -> same-shaped tensor of Haar-random-SU(2) Euler angles,
-    ready to feed straight into local_su2.
+    Uniform(0, 2*pi) -> same-shaped tensor of Haar-random-SU(2) Euler angles,
+    ready to feed into local_su2.
     """
     u = raw / (2 * torch.pi)
     alpha, beta, gamma = haar_reparam.euler_angles(u[:, 0], u[:, 1], u[:, 2])
@@ -82,26 +81,18 @@ def haar_su2_params(raw):
 
 
 def brickwork_layer_pairs(num_wires: int, layer: int) -> int:
-    """How many 2-qubit gates layer `layer` applies in the alternating-offset
-    brickwork (circuits 32/33/34, and generic_ansatz's structure=1)."""
+    """Number of 2-qubit gates layer `layer` applies in the alternating-offset
+    brickwork."""
     num_pairs = num_wires // 2
     wires_parity = 1 - (num_wires % 2)
     return num_pairs - layer % 2 * wires_parity
 
 
 def _kak1_block(params, wires=None, reparam: bool = False):
-    """Brickwork of KAK1 2-qubit blocks -- circuits 33 (reparam=False) and
-    34 (reparam=True) are the exact same gate structure, differing only in
-    where their angles come from: circuit 33 feeds the raw Uniform(0, 2*pi)
-    params straight into local_su2/core_kak; circuit 34 (reparam=True)
-    sends the local dressings through haar_su2_params and the canonical
-    core's angles through haar_reparam.sample_canonical first, so every
-    2-qubit gate comes out exactly Haar-distributed on SU(4) instead of
-    circuit 33's raw/naive angles.
+    """Brickwork of KAK1 2-qubit blocks
 
     params : tensor of shape (num_layers, num_wires//2, 3, 3)
-    [+ optional trailing batch dim], entries Uniform(0, 2*pi) -- same raw
-    convention as every other circuit here.
+    [+ optional trailing batch dim], entries Uniform(0, 2*pi)
     """
     if wires is None:
         wires = list(range(params.shape[1] * 2))
@@ -629,10 +620,6 @@ def n_trainable(num, num_wires, reps=1):
     count the nonzero gradients. A structurally-unused entry gets an exact
     zero gradient; a coincidental zero from a used entry has probability zero
     under random projection weights and random input angles.
-
-    For a generic_ansatz code, use architectures.Architecture.n_trainable
-    instead of this function directly -- generic_ansatz has an exact
-    closed-form count, so there's no need to probe it this way.
     """
     shape = weight_tensor_shape(num, num_wires, reps)
     generator = torch.Generator().manual_seed(0)

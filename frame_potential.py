@@ -1,12 +1,6 @@
 """
 Frame potential estimation: an Estimate accumulator and the estimators
-built on it. The batched-unitary-construction half of this module's
-original design now lives in simulation.py (code review, "Three modules
-in one" -- simulation, estimation here, I/O in results_io.py);
-get_device/apply_embedded_gate/sample_unitaries/recommended_batch_size are
-re-exported below so existing `frame_potential.X` call sites (run.py,
-extras/benchmark.py, extras/expressibility.py, extras/range_connectivity.py)
-keep working unchanged.
+built on it.
 
 Design : a frozen `Estimate` dataclass that behaves like an
 accumulator (`estimate_a + estimate_b` pools two independent Monte Carlo
@@ -16,15 +10,12 @@ batches), and four small functions :
     estimate_until_converged    — loop estimate_once until the CI is tight enough
     report / save_estimate      — printing and persistence
 
-estimate_once and estimate_until_converged are circuit_set-specific thin
-wrappers (via `_circuit_sampler`) around the two functions the estimation
-logic actually lives in, estimate_once_from_sampler and
-estimate_until_converged_from_sampler. Those take any `sampler(batch_size,
-*, device, dtype, generator) -> Tensor[batch_size, d, d]` callable, so any
-ensemble that isn't a circuit_set architecture at all -- e.g.
-checks/clifford_group.py's random-Clifford calibration, which has no
-continuous parameters and no PennyLane gates to trace -- gets the exact
+estimate_once_from_sampler and estimate_until_converged_from_sampler take 
+any `sampler(batch_size,*, device, dtype, generator) -> Tensor[batch_size, d, d]` 
+callable, so any ensemble that isn't a circuit_set architecture at all gets the exact
 same accumulation, pooling, and confidence-interval machinery for free.
+estimate_once and estimate_until_converged are circuit_set-specific thin
+wrappers (via `_circuit_sampler`) around these two functions.
 """
 
 import math
@@ -58,13 +49,10 @@ class Estimate:
         'variance' is the *unbiased* variance of `frame_potential`
         'n_pairs' is the number of independent pairs contributing to this estimate.
         't'/'d' are the frame potential order and Hilbert space dimension.
-        'converged' is None for a plain estimate_once(_from_sampler) result
-        (no stopping rule was ever evaluated); estimate_until_converged
-        (_from_sampler) sets it to whether its own stopping rule was
-        actually satisfied before max_batches ran out -- callers read this
+        'converged' is None for a plain estimate_once(_from_sampler) result.
+        estimate_until_converged (_from_sampler) sets it to whether its own stopping rule was
+        actually satisfied before max_batches ran out; callers read this
         instead of re-deriving the same rel_tol*|delta| check themselves
-        (three places used to: here, run.py's _converged, and
-        extras/validate_local_random.py's check_convergence_pathology).
 
     __add__ pools it correctly across batches (as an n_k-weighted average of
     independent-batch variances) rather than re-deriving a fresh naive one
@@ -151,25 +139,18 @@ def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -
 
 Sampler = Callable[..., torch.Tensor]
 """
-A `Sampler` is any callable (batch_size, *, device, dtype, generator) ->
-Tensor[batch_size, d, d] of unitaries — sample_unitaries(num, n_qubits, reps,
-...) partially applied is one, but so is a function that generates random unitaries.
+A `Sampler` is any callable (batch_size, *, device, dtype, generator) -> Tensor[batch_size, d, d] of unitaries
 """
 
 def _is_oom(exc: RuntimeError) -> bool:
     return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
 
-
-def _estimate_once_with_batch_size(sampler: Sampler, d: int, t: int, n_samples: int, *,
+def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int, *,
                                     device: Optional[torch.device] = None,
                                     dtype: torch.dtype = torch.complex64,
                                     generator: Optional[torch.Generator] = None):
-    """Same backoff behavior as estimate_once_from_sampler, but also returns
-    the batch size `n` that actually succeeded -- exactly, not re-derived
-    from Estimate.n_pairs via round(2*sqrt(n_pairs)) (an approximation,
-    only exact for even n). estimate_until_converged_from_sampler needs
-    this to clamp its own doubling after a backoff; every other caller
-    goes through estimate_once_from_sampler below, which just discards it.
+    """Draw n_samples unitaries from `sampler` (split into two independent
+        halves A, B) and estimate F^(t) from all n_a * n_b cross pairs.
     """
     if device is None:
         device = get_device()
@@ -192,33 +173,6 @@ def _estimate_once_with_batch_size(sampler: Sampler, d: int, t: int, n_samples: 
             n = n_next
 
 
-def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int, *,
-                                device: Optional[torch.device] = None,
-                                dtype: torch.dtype = torch.complex64,
-                                generator: Optional[torch.Generator] = None) -> Estimate:
-    """Draw n_samples unitaries from `sampler` (split into two independent
-    halves A, B) and estimate F^(t) from all n_a * n_b cross pairs.
-    `d` is the Hilbert space dimension the sampler produces (needed for
-    Estimate.d / Estimate.haar, not inferrable from the sampler itself).
-
-    `_recommended_batch_size_for_d` (what callers use to pick n_samples) only
-    estimates _estimate_from_batches's own peak memory -- it has no way to
-    know the sampler's peak, which for sample_unitaries includes whatever
-    apply_embedded_gate's reshape/movedim pipeline needs transiently per gate,
-    on top of the (batch, d, d) unitary itself. That gap is what actually
-    OOMs in practice at large d, not the formula being wrong about the part
-    it does model. Rather than pad the formula with a guessed safety factor
-    for a cost it can't see, this backs off and retries on an actual CUDA
-    OOM: halve n_samples, free the cache, try again, down to a floor of 4.
-    The returned Estimate.n_pairs honestly reflects whatever batch size
-    actually succeeded, so callers (including estimate_until_converged_from_sampler,
-    which just sees a smaller-than-requested batch and keeps looping) don't
-    need to know this happened.
-    """
-    est, _ = _estimate_once_with_batch_size(sampler, d, t, n_samples, device=device,
-                                             dtype=dtype, generator=generator)
-    return est
-
 
 def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
                                            n_samples: Optional[int] = None,
@@ -238,19 +192,11 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
         n_samples = d * t * 10  # heuristic starting point
 
     max_batch_size = _recommended_batch_size_for_d(d, device, dtype)
-    n_samples = min(n_samples, max_batch_size)  # the heuristic above grows with d; the memory
-                                                 # cap shrinks with d -- clamp before the first
-                                                 # call too, not just the doublings below, or a
-                                                 # large-d first call can ask for far more than
-                                                 # fits (this was the actual OOM cause -- see
-                                                 # _estimate_from_batches's docstring for the rest)
-    est, achieved = _estimate_once_with_batch_size(sampler, d, t, n_samples,
+    n_samples = min(n_samples, max_batch_size) 
+
+    est, achieved = estimate_once_from_sampler(sampler, d, t, n_samples,
                                                     device=device, dtype=dtype, generator=generator)
-    # estimate_once backs off silently on OOM, so what it actually used can
-    # be smaller than what was asked for. If it backed off, treat that as
-    # the new ceiling instead of max_batch_size, or every doubling below
-    # would re-discover the exact same OOM (and pay its own backoff sub-loop)
-    # from scratch every single iteration.
+    
     if achieved < n_samples:
         max_batch_size = min(max_batch_size, achieved)
         n_samples = achieved
@@ -268,7 +214,7 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
             print(f"  batch {i}: F={est.frame_potential:.4f} error={est.fidelity_error:.4f} "
                   f"target={target:.4f} n_pairs={est.n_pairs}")
         n_samples = min(n_samples * 2, max_batch_size)
-        new_est, achieved = _estimate_once_with_batch_size(sampler, d, t, n_samples,
+        new_est, achieved = estimate_once_from_sampler(sampler, d, t, n_samples,
                                                              device=device, dtype=dtype,
                                                              generator=generator)
         if achieved < n_samples:
@@ -297,10 +243,11 @@ def estimate_once(arch: Architecture, n_qubits: int, reps: int, t: int, n_sample
     """
     estimate_once_from_sampler Wrapper for circuit_set/generic_ansatz architectures.
     """
-    return estimate_once_from_sampler(
+    est,_ = estimate_once_from_sampler(
         _circuit_sampler(arch, n_qubits, reps), 2 ** n_qubits, t, n_samples,
         device=device, dtype=dtype, generator=generator,
     )
+    return est
 
 
 def estimate_until_converged(arch: Architecture, n_qubits: int, reps: int, t: int, *,

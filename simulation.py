@@ -1,8 +1,6 @@
 """Batched unitary construction from circuits.py/generic_ansatz.py circuit
 definitions, via architectures.Architecture -- the GPU-friendly half of
-frame_potential.py's original design, split out (code review, "Three
-modules in one": simulation, estimation, I/O -- I/O is results_io.py,
-estimation stays in frame_potential.py, this is simulation).
+frame_potential.py's original design, split out
 
 sample_unitaries builds the batch of unitaries via reshape + axis-
 contraction rather than the naive kron(I, gate, I) + matmul approach — the
@@ -41,7 +39,7 @@ def _recommended_batch_size_for_d(d: int, device: torch.device,
     bytes_per_element = 8 if dtype == torch.complex64 else 16
     if device.type == "cuda":
         free_bytes, _ = torch.cuda.mem_get_info(device)
-        usable = free_bytes * 0.5
+        usable = free_bytes * 0.7
     else:
         usable = 4 * 1024 ** 3  # assume a 4 GB budget when running on CPU
     a, b = bytes_per_element, 2 * d * d * bytes_per_element

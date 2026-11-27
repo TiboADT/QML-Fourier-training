@@ -18,9 +18,9 @@ Examples
     python check.py show 34 --n-qubits 6 --reps 2 # draw a circuit_set architecture
     python check.py show connectivity             # draw one range-connectivity realization
 
-Run `python check.py validate --only <anything>` with a bad value, or
-`python check.py validate -h`, to see the full list of valid checks and
-their aliases -- that list lives in checks/validate.py, not here.
+Run `python check.py validate --only -h` to see the full list of 
+valid checks and their aliases.
+That list lives in checks/validate.py, not here.
 """
 
 import argparse
