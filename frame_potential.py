@@ -1,181 +1,41 @@
 """
-Frame potential estimation, computed directly from the PennyLane circuit
-definitions in circuits.py.
-
-Computing the frame potential from the exact same circuit_set(num)
-function used for training makes that whole class of bug structurally
-impossible.
+Frame potential estimation: an Estimate accumulator and the estimators
+built on it.
 
 Design : a frozen `Estimate` dataclass that behaves like an
 accumulator (`estimate_a + estimate_b` pools two independent Monte Carlo
 batches), and four small functions :
-    sample_unitaries          — batched unitary construction (GPU-friendly)
+    sample_unitaries          — batched unitary construction (GPU-friendly, simulation.py)
     estimate_once              — one Monte Carlo batch -> Estimate
     estimate_until_converged    — loop estimate_once until the CI is tight enough
     report / save_estimate      — printing and persistence
 
+estimate_once_from_sampler and estimate_until_converged_from_sampler take 
+any `sampler(batch_size,*, device, dtype, generator) -> Tensor[batch_size, d, d]` 
+callable, so any ensemble that isn't a circuit_set architecture at all gets the exact
+same accumulation, pooling, and confidence-interval machinery for free.
 estimate_once and estimate_until_converged are circuit_set-specific thin
-wrappers (via `_circuit_sampler`) around the two functions the estimation
-logic actually lives in, estimate_once_from_sampler and
-estimate_until_converged_from_sampler. Those take any `sampler(batch_size,
-*, device, dtype, generator) -> Tensor[batch_size, d, d]` callable, so any
-ensemble that isn't a circuit_set architecture at all -- e.g. two_designs/'s
-random-Clifford calibration, which has no continuous parameters and no
-PennyLane gates to trace -- gets the exact same accumulation, pooling, and
-confidence-interval machinery for free.
-
-GPU: sample_unitaries builds the batch of unitaries via reshape + einsum
-axis-contraction rather than the naive kron(I, gate, I) + matmul
-approach — the latter is O(batch * d^3) per gate, this is O(batch * d^2),
-which is the best achievable for materialising a full d x d unitary (as
-opposed to propagating a single state vector, which is O(batch * d)).
-Consecutive single-qubit gates on the same wire are also fused into one
-matrix before touching the full tensor, which further cuts the number of
-full-tensor passes. Everything is plain torch ops, so it runs on GPU for
-free by passing device=torch.device("cuda").
+wrappers (via `_circuit_sampler`) around these two functions.
 """
 
-import csv
 import math
 import os
-import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
 from typing import Callable, Optional
 
 import torch
-import pennylane as qp
 
-from circuits import circuit_set, weight_tensor_shape, n_trainable
-
-
-# ── device ──────────────────────────────────────────────────────────────
-
-def get_device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    return torch.device("cpu")
-
-
-def _recommended_batch_size_for_d(d: int, device: torch.device,
-                                   dtype: torch.dtype = torch.complex64) -> int:
-    """Largest N such that _estimate_from_batches's peak memory -- two
-    (N, d^2) reshaped batches plus the (N, N) GEMM output, peak = 2*N*d^2*bpe
-    + N^2*bpe -- fits comfortably in available memory."""
-
-    bytes_per_element = 8 if dtype == torch.complex64 else 16
-    if device.type == "cuda":
-        free_bytes, _ = torch.cuda.mem_get_info(device)
-        usable = free_bytes * 0.5
-    else:
-        usable = 4 * 1024 ** 3  # assume a 4 GB budget when running on CPU
-    a, b = bytes_per_element, 2 * d * d * bytes_per_element
-    n = (-b + math.sqrt(b * b + 4 * a * usable)) / (2 * a)
-    return max(2, int(n))
-
-
-def recommended_batch_size(n_qubits: int, device: torch.device,
-                            dtype: torch.dtype = torch.complex64) -> int:
-    return _recommended_batch_size_for_d(2 ** n_qubits, device, dtype)
-
-
-# ── tracing circuit_set(num) into a flat, fused gate list ─────────────────
-
-def _trace_operations(num, n_qubits, weights, generic: bool = False):
-    """Capture circuit_set(num)'s operation sequence via PennyLane's queuing
-    mechanism. `weights` carries a trailing batch dimension (shape from
-    weight_tensor_shape(...) + (batch_size,)) — circuits.py's circuits index
-    into it as params[i, q, ...], so every sliced-out gate parameter comes
-    out already batch-shaped, with no per-circuit code needed to support it.
-    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
-    """
-    with qp.queuing.AnnotatedQueue() as q:
-        circuit_set(num=num, generic=generic)(weights, wires=list(range(n_qubits)))
-    return qp.tape.QuantumScript.from_queue(q).operations
-
-
-def _fused_gate_list(operations, dtype, device):
-    """Merge consecutive single-qubit gates on the same wire into one
-    matrix (cheap, O(batch) per merge) """
-    pending = {}
-    fused = []
-
-    def flush(wire):
-        if wire in pending:
-            fused.append(((wire,), pending.pop(wire)))
-
-    for op in operations:
-        wires = op.wires.tolist()
-        G = op.matrix()
-        if not torch.is_tensor(G):
-            G = torch.as_tensor(G)
-        G = G.to(dtype=dtype, device=device)
-        if len(wires) == 1:
-            w = wires[0]
-            pending[w] = G if w not in pending else G @ pending[w]
-        elif len(wires) == 2:
-            flush(wires[0])
-            flush(wires[1])
-            fused.append((tuple(wires), G))
-        else:
-            raise ValueError(
-                f"gate {op.name} acts on {len(wires)} wires; "
-                "only 1- and 2-qubit gates are supported"
-            )
-    for w in list(pending):
-        flush(w)
-    return fused
-
-
-# ── batched unitary contraction ────────────────────────────────────────
-
-def apply_embedded_gate(U: torch.Tensor, G: torch.Tensor, wires: tuple, n_qubits: int) -> torch.Tensor:
-    """Apply gate matrix G (2^k, 2^k) or (batch, 2^k, 2^k) to `wires` of the
-    batched unitary U (batch, d, d).
-    Reshapes U's row-index into one axis per qubit, moves the target axes to
-    the front, contracts, and moves them back — O(batch * d^2) instead of
-    O(batch * d^3) per gate, since only the touched axes are ever expanded.
-    """
-    B, d, _ = U.shape
-    k = len(wires)
-    U = U.reshape(B, *([2] * n_qubits), d)
-    axes = [1 + w for w in wires]
-    dest = list(range(1, 1 + k))
-    U = torch.movedim(U, axes, dest)
-    rest_shape = U.shape[1 + k:]
-    U = U.reshape(B, 2 ** k, -1)
-    U = (G @ U) if G.dim() == 2 else torch.einsum("bij,bjk->bik", G, U)
-    U = U.reshape(B, *([2] * k), *rest_shape)
-    U = torch.movedim(U, dest, axes)
-    return U.reshape(B, d, d)
-
-
-def sample_unitaries(num: int, n_qubits: int, reps: int, batch_size: int, *,
-                      generic: bool = False,
-                      device: Optional[torch.device] = None,
-                      dtype: torch.dtype = torch.complex64,
-                      generator: Optional[torch.Generator] = None) -> torch.Tensor:
-    """batch_size independent samples of circuit_set(num)'s unitary at
-    (n_qubits, reps), each with parameters drawn uniformly on [0, 2*pi).
-    Returns a (batch_size, d, d) tensor on `device`.
-    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
-    """
-    if device is None:
-        device = get_device()
-    shape = weight_tensor_shape(num, n_qubits, reps, generic=generic)
-    weights = 2 * torch.pi * torch.rand(shape + (batch_size,), dtype=torch.float64, generator=generator)
-    weights = weights.to(device)
-
-    operations = _trace_operations(num, n_qubits, weights, generic=generic)
-    fused = _fused_gate_list(operations, dtype, device)
-
-    d = 2 ** n_qubits
-    U = torch.eye(d, dtype=dtype, device=device).expand(batch_size, d, d).clone()
-    for wires, G in fused:
-        U = apply_embedded_gate(U, G, wires, n_qubits)
-    return U
+import results_io
+from architectures import Architecture
+from simulation import (  # noqa: F401 -- re-exported for existing frame_potential.X call sites
+    get_device,
+    recommended_batch_size,
+    apply_embedded_gate,
+    sample_unitaries,
+    _recommended_batch_size_for_d,
+)
 
 
 # ── frame potential estimator ──────────────────────────────────────────
@@ -185,10 +45,14 @@ class Estimate:
     """One (possibly pooled) Monte Carlo estimate of F^(t).
 
         'total'/'sum_sq' are the raw Σ|Tr(Ui†Uj)|^(2t) / Σ|Tr(Ui†Uj)|^(4t) sums
-        over n_pairs pairs — additive across independent batches. 
+        over n_pairs pairs — additive across independent batches.
         'variance' is the *unbiased* variance of `frame_potential`
         'n_pairs' is the number of independent pairs contributing to this estimate.
         't'/'d' are the frame potential order and Hilbert space dimension.
+        'converged' is None for a plain estimate_once(_from_sampler) result.
+        estimate_until_converged (_from_sampler) sets it to whether its own stopping rule was
+        actually satisfied before max_batches ran out; callers read this
+        instead of re-deriving the same rel_tol*|delta| check themselves
 
     __add__ pools it correctly across batches (as an n_k-weighted average of
     independent-batch variances) rather than re-deriving a fresh naive one
@@ -200,6 +64,7 @@ class Estimate:
     n_pairs: int
     t: int
     d: int
+    converged: Optional[bool] = None
 
     @property
     def frame_potential(self) -> float:
@@ -272,40 +137,20 @@ def _estimate_from_batches(UA: torch.Tensor, UB: torch.Tensor, t: int, d: int) -
                      n_pairs=n_a * n_b, t=t, d=d)
 
 
-
 Sampler = Callable[..., torch.Tensor]
 """
-A `Sampler` is any callable (batch_size, *, device, dtype, generator) ->
-Tensor[batch_size, d, d] of unitaries — sample_unitaries(num, n_qubits, reps,
-...) partially applied is one, but so is a function that generates random unitaries.
+A `Sampler` is any callable (batch_size, *, device, dtype, generator) -> Tensor[batch_size, d, d] of unitaries
 """
 
 def _is_oom(exc: RuntimeError) -> bool:
     return isinstance(exc, torch.cuda.OutOfMemoryError) or "out of memory" in str(exc).lower()
 
-
 def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int, *,
-                                device: Optional[torch.device] = None,
-                                dtype: torch.dtype = torch.complex64,
-                                generator: Optional[torch.Generator] = None) -> Estimate:
+                                    device: Optional[torch.device] = None,
+                                    dtype: torch.dtype = torch.complex64,
+                                    generator: Optional[torch.Generator] = None):
     """Draw n_samples unitaries from `sampler` (split into two independent
-    halves A, B) and estimate F^(t) from all n_a * n_b cross pairs. 
-    `d` is the Hilbert space dimension the sampler produces (needed for
-    Estimate.d / Estimate.haar, not inferrable from the sampler itself).
-
-    `_recommended_batch_size_for_d` (what callers use to pick n_samples) only
-    estimates _estimate_from_batches's own peak memory -- it has no way to
-    know the sampler's peak, which for sample_unitaries includes whatever
-    apply_embedded_gate's reshape/movedim pipeline needs transiently per gate,
-    on top of the (batch, d, d) unitary itself. That gap is what actually
-    OOMs in practice at large d, not the formula being wrong about the part
-    it does model. Rather than pad the formula with a guessed safety factor
-    for a cost it can't see, this backs off and retries on an actual CUDA
-    OOM: halve n_samples, free the cache, try again, down to a floor of 4.
-    The returned Estimate.n_pairs honestly reflects whatever batch size
-    actually succeeded, so callers (including estimate_until_converged_from_sampler,
-    which just sees a smaller-than-requested batch and keeps looping) don't
-    need to know this happened.
+        halves A, B) and estimate F^(t) from all n_a * n_b cross pairs.
     """
     if device is None:
         device = get_device()
@@ -316,7 +161,7 @@ def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int,
         try:
             UA = sampler(n_a, device=device, dtype=dtype, generator=generator)
             UB = sampler(n_b, device=device, dtype=dtype, generator=generator)
-            return _estimate_from_batches(UA, UB, t, d)
+            return _estimate_from_batches(UA, UB, t, d), n
         except RuntimeError as e:
             if not _is_oom(e) or n <= 4:
                 raise
@@ -326,6 +171,7 @@ def estimate_once_from_sampler(sampler: Sampler, d: int, t: int, n_samples: int,
             print(f"  [frame_potential] OOM at n_samples={n} (device={device}) -- "
                   f"retrying at {n_next}")
             n = n_next
+
 
 
 def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
@@ -346,72 +192,65 @@ def estimate_until_converged_from_sampler(sampler: Sampler, d: int, t: int, *,
         n_samples = d * t * 10  # heuristic starting point
 
     max_batch_size = _recommended_batch_size_for_d(d, device, dtype)
-    n_samples = min(n_samples, max_batch_size)  # the heuristic above grows with d; the memory
-                                                 # cap shrinks with d -- clamp before the first
-                                                 # call too, not just the doublings below, or a
-                                                 # large-d first call can ask for far more than
-                                                 # fits (this was the actual OOM cause -- see
-                                                 # _estimate_from_batches's docstring for the rest)
-    est = estimate_once_from_sampler(sampler, d, t, n_samples,
-                                      device=device, dtype=dtype, generator=generator)
-    # estimate_once_from_sampler backs off silently on OOM, so what it actually
-    # used can be smaller than what was asked for -- n_pairs = n_a*n_b with
-    # n_a ~= n_b ~= n/2 gives n ~= 2*sqrt(n_pairs). If it backed off, treat that
-    # as the new ceiling instead of max_batch_size, or every doubling below
-    # would re-discover the exact same OOM (and pay its own backoff sub-loop)
-    # from scratch every single iteration.
-    achieved = int(round(2 * math.sqrt(est.n_pairs)))
+    n_samples = min(n_samples, max_batch_size) 
+
+    est, achieved = estimate_once_from_sampler(sampler, d, t, n_samples,
+                                                    device=device, dtype=dtype, generator=generator)
+    
     if achieved < n_samples:
         max_batch_size = min(max_batch_size, achieved)
         n_samples = achieved
 
-    for i in range(max_batches):
+    def _converged(est):
         target = abs(rel_tol * est.delta)
-        if est.fidelity_error <= target or est.fidelity_error <= min_abs_error:
+        return est.fidelity_error <= target or est.fidelity_error <= min_abs_error
+
+    converged = _converged(est)
+    for i in range(max_batches):
+        if converged:
             break
         if verbose:
+            target = abs(rel_tol * est.delta)
             print(f"  batch {i}: F={est.frame_potential:.4f} error={est.fidelity_error:.4f} "
                   f"target={target:.4f} n_pairs={est.n_pairs}")
         n_samples = min(n_samples * 2, max_batch_size)
-        new_est = estimate_once_from_sampler(sampler, d, t, n_samples,
-                                              device=device, dtype=dtype, generator=generator)
-        achieved = int(round(2 * math.sqrt(new_est.n_pairs)))
+        new_est, achieved = estimate_once_from_sampler(sampler, d, t, n_samples,
+                                                             device=device, dtype=dtype,
+                                                             generator=generator)
         if achieved < n_samples:
             max_batch_size = min(max_batch_size, achieved)
             n_samples = achieved
         est = est + new_est
+        converged = _converged(est)
 
-    return est
+    return replace(est, converged=converged)
 
 
-def _circuit_sampler(num: int, n_qubits: int, reps: int, generic: bool = False) -> Sampler:
-    """The sampler backing every circuit_set architecture: partially applies
-    sample_unitaries so it matches the generic (batch_size, *, device, dtype,
-    generator) -> Tensor interface. generic=True: `num` is a generic_ansatz
-    code -- see circuits.circuit_set."""
+def _circuit_sampler(arch: Architecture, n_qubits: int, reps: int) -> Sampler:
+    """The sampler backing every circuit_set/generic_ansatz architecture:
+    partially applies sample_unitaries so it matches the generic
+    (batch_size, *, device, dtype, generator) -> Tensor interface."""
     def sampler(batch_size, *, device=None, dtype=torch.complex64, generator=None):
-        return sample_unitaries(num, n_qubits, reps, batch_size, generic=generic,
+        return sample_unitaries(arch, n_qubits, reps, batch_size,
                                  device=device, dtype=dtype, generator=generator)
     return sampler
 
 
-def estimate_once(num: int, n_qubits: int, reps: int, t: int, n_samples: int, *,
-                   generic: bool = False,
+def estimate_once(arch: Architecture, n_qubits: int, reps: int, t: int, n_samples: int, *,
                    device: Optional[torch.device] = None,
                    dtype: torch.dtype = torch.complex64,
                    generator: Optional[torch.Generator] = None) -> Estimate:
     """
-    estimate_once_from_sampler Wrapper for circuit_set(num) architectures.
-    generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
+    estimate_once_from_sampler Wrapper for circuit_set/generic_ansatz architectures.
     """
-    return estimate_once_from_sampler(
-        _circuit_sampler(num, n_qubits, reps, generic=generic), 2 ** n_qubits, t, n_samples,
+    est,_ = estimate_once_from_sampler(
+        _circuit_sampler(arch, n_qubits, reps), 2 ** n_qubits, t, n_samples,
         device=device, dtype=dtype, generator=generator,
     )
+    return est
 
 
-def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
-                              generic: bool = False,
+def estimate_until_converged(arch: Architecture, n_qubits: int, reps: int, t: int, *,
                               n_samples: Optional[int] = None,
                               rel_tol: float = 0.4,
                               max_batches: int = 50,
@@ -421,11 +260,10 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
                               generator: Optional[torch.Generator] = None,
                               verbose: bool = False) -> Estimate:
     """
-        estimate_until_converged Wrapper for circuit_set(num) architectures.
-        generic=True: `num` is a generic_ansatz code -- see circuits.circuit_set.
+        estimate_until_converged Wrapper for circuit_set/generic_ansatz architectures.
         """
     return estimate_until_converged_from_sampler(
-        _circuit_sampler(num, n_qubits, reps, generic=generic), 2 ** n_qubits, t,
+        _circuit_sampler(arch, n_qubits, reps), 2 ** n_qubits, t,
         n_samples=n_samples, rel_tol=rel_tol, max_batches=max_batches,
         min_abs_error=min_abs_error, device=device, dtype=dtype,
         generator=generator, verbose=verbose,
@@ -433,10 +271,8 @@ def estimate_until_converged(num: int, n_qubits: int, reps: int, t: int, *,
 
 
 
-def report(est: Estimate, *, circuit_num: int = None, n_qubits: int = None, reps: int = None,
-           generic: bool = False) -> str:
-    label = "generic_ansatz" if generic else "circuit"
-    header = f"{label} {circuit_num}, n_qubits={n_qubits}, reps={reps}" if circuit_num is not None else ""
+def report(est: Estimate, *, arch: Architecture = None, n_qubits: int = None, reps: int = None) -> str:
+    header = f"{arch.label}, n_qubits={n_qubits}, reps={reps}" if arch is not None else ""
     return (
         f"{header}\n"
         f"  F^({est.t}) (ansatz) : {est.frame_potential:.6f}\n"
@@ -461,22 +297,9 @@ FRAME_POTENTIAL_FIELDS = [
 ]
 
 
-def _git_commit_hash() -> str:
-    """So a saved row can always be traced back to the code that produced
-    it (code review §1.5) — "unknown" outside a git repo or with no commits."""
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            stderr=subprocess.DEVNULL,
-        ).decode().strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return "unknown"
-
-
-def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
+def save_estimate(est: Estimate, *, arch: Architecture, n_qubits: int, reps: int,
                    device, dtype, seed: Optional[int] = None, notes: str = "",
-                   path: str = FRAME_POTENTIAL_CSV, generic: bool = False) -> str:
+                   path: str = FRAME_POTENTIAL_CSV) -> str:
     """Append one row to `path` (creating it with a header if needed).
     Deriving frame_potential/delta/ratio/fidelity_error from Estimate's
     properties."""
@@ -484,12 +307,12 @@ def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
     row = {
         "id": row_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "git_commit": _git_commit_hash(),
-        "circuit_num": circuit_num,
-        "generic": generic,
+        "git_commit": results_io.git_commit_hash(),
+        "circuit_num": arch.num,
+        "generic": arch.generic,
         "n_qubits": n_qubits,
         "reps": reps,
-        "n_params": n_trainable(circuit_num, n_qubits, reps, generic=generic),
+        "n_params": arch.n_trainable(n_qubits, reps),
         "t": est.t,
         "frame_potential": est.frame_potential,
         "haar_value": est.haar,
@@ -504,15 +327,7 @@ def save_estimate(est: Estimate, *, circuit_num: int, n_qubits: int, reps: int,
         "seed": seed if seed is not None else "",
         "notes": notes,
     }
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    file_exists = os.path.exists(path)
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=FRAME_POTENTIAL_FIELDS)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+    results_io.append_row(path, FRAME_POTENTIAL_FIELDS, row)
     return row_id
 
 

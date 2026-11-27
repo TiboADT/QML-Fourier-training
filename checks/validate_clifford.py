@@ -1,5 +1,5 @@
 """Calibration check for the frame-potential estimator, using random
-Clifford circuits ("Family A" in the "Building 2-Designs" design notes).
+Clifford circuits.
 
 The Clifford group is an exact 3-design, so this is the one ensemble where
 the right answer is known in closed form: F^(t) = t! for t = 1, 2, 3, at
@@ -12,7 +12,7 @@ every n. Two independent checks:
 
   2. Monte Carlo: sample_clifford_unitaries pushed through
      frame_potential's generic estimate_once_from_sampler, at n = 4, 6 --
-     the same code path any future two_designs family will use. If the
+     the same code path any future non-circuit_set ensemble will use. If the
      reported F^(t) isn't within its own confidence interval of t!, the bug
      is in the *general* Monte Carlo estimator, not in anything specific to
      Cliffords.
@@ -38,7 +38,7 @@ import time
 import torch
 
 import frame_potential as fp
-from two_designs.clifford_group import (
+from checks.clifford_group import (
     clifford_group_order,
     exact_estimate_from_group,
     iter_all_clifford_unitaries,
@@ -47,9 +47,9 @@ from two_designs.clifford_group import (
 
 
 def check_exact(n_qubits: int, ts=(1, 2, 3)):
-    """t! is only the exact Haar value of F^(t) for t <= d (Prop. 1/3 in the
-    design notes -- Schur-Weyl needs the t! permutation operators to stay
-    linearly independent, which fails past t = d). t values above d = 2**n_qubits
+    """t! is only the exact Haar value of F^(t) for t <= d -- Schur-Weyl
+    duality needs the t! permutation operators to stay linearly
+    independent, which fails past t = d. t values above d = 2**n_qubits
     are skipped rather than flagged, not silently passed."""
     d = 2 ** n_qubits
     order = clifford_group_order(n_qubits)

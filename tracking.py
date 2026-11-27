@@ -6,8 +6,9 @@ from datetime import datetime
 
 import numpy as np
 
-from functions import train, build_model
-from circuits import n_trainable
+import results_io
+from training import train, build_model
+from architectures import Architecture
 
 # ------------------------------------------------------------------
 # Paths (override before importing if needed)
@@ -18,11 +19,12 @@ COSTS_DIR       = "costs"
 EXPERIMENTS_FIELDS = [
     "id",
     "timestamp",
+    "git_commit",
     "circuit_num",
     "generic",
     "n_qubits",
     "layers",
-    "anzats_reps",
+    "ansatz_reps",
     "n_params",
     "n_train_samples",
     "max_steps",
@@ -30,33 +32,23 @@ EXPERIMENTS_FIELDS = [
     "n_expvals",
     "final_cost",
     "initial_cost",
+    "seed",
     "notes",
 ]
 
 
-def _ensure_csv(path: str, fieldnames: list[str]) -> None:
-    """Create the CSV with a header row if it does not exist yet."""
-    directory = os.path.dirname(path)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    if not os.path.exists(path):
-        with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-
-def _append_row(path: str, fieldnames: list[str], row: dict) -> None:
-    with open(path, "a", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writerow(row)
-
-
 def load_experiments(experiments_csv: str = EXPERIMENTS_CSV, path: str = None):
-    """Return all experiment summary rows as a list of dicts."""
+    """Return all experiment summary rows as a list of dicts.
+    """
     if path is not None:
         experiments_csv = os.path.join(path, experiments_csv)
-    _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
+    results_io.ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
     with open(experiments_csv, "r", newline="") as f:
-        return list(csv.DictReader(f))
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        if "anzats_reps" in row:
+            row["ansatz_reps"] = row.pop("anzats_reps")
+    return rows
 
 
 def save_cost_curve(experiment_id: str, costs, path: str = "results/") -> None:
@@ -104,7 +96,7 @@ class TrainingResult:
     generic: bool
     n_qubits: int
     layers: int
-    anzats_reps: int
+    ansatz_reps: int
     n_params: int
     n_train_samples: int
     max_steps: int
@@ -113,34 +105,31 @@ class TrainingResult:
     final_weights: "torch.Tensor"
     cst: "torch.Tensor"
     notes: str = ""
+    seed: "Optional[int]" = None
 
 
 def run_training(
     x,
     target_y,
-    circuit_num: int,
+    arch: Architecture,
     n_qubits: int,
     layers: int,
-    anzats_reps: int,
+    ansatz_reps: int,
     max_steps: int = 200,
     batch_size: int = 100,
     display_step: int = 10,
     notes: str = "",
-    train_fn = train,
-    generic: bool = False,
+    seed: "Optional[int]" = None,
 ) -> TrainingResult:
-    """Build the model and run `train` -- pure compute, no file I/O. Split
-    out of train_and_record so the expensive part (this) can run in a
-    parallel worker process while a single, non-concurrent caller does all
-    the disk writing afterward (record_training) -- concurrent appends to
-    the same experiments.csv from multiple OS processes aren't safe, so
-    only ever call record_training from one process at a time against a
-    given `path`. See run.py's `--n-workers` for the parallel caller.
-    """
-    model, weights = build_model(circuit_num, n_qubits, layers, anzats_reps,
-                                  measuring_qubit=n_qubits - 1, generic=generic)
+    """Build the model and run `train` (pure compute, no file I/O).
 
-    final_weights, cst = train_fn(
+    `seed` is carried through to the recorded row only -- it is not used
+    here to seed anything, so every run recorded from one sweep shares the same value.
+    """
+    model, weights = build_model(arch, n_qubits, layers, ansatz_reps,
+                                  measuring_qubit=n_qubits - 1)
+
+    final_weights, cst = train(
         model, weights, x, target_y,
         max_steps=max_steps,
         batch_size=batch_size,
@@ -149,24 +138,20 @@ def run_training(
     )
 
     return TrainingResult(
-        circuit_num=circuit_num,
-        generic=generic,
+        circuit_num=arch.num,
+        generic=arch.generic,
         n_qubits=n_qubits,
         layers=layers,
-        anzats_reps=anzats_reps,
-        # weight_tensor_shape allocates a rectangular tensor, but several
-        # circuits don't read all of it — count what's
-        # actually trainable rather than the raw tensor size.
-        n_params=layers * n_trainable(circuit_num, n_qubits, anzats_reps, generic=generic),
+        ansatz_reps=ansatz_reps,
+        n_params=layers * arch.n_trainable(n_qubits, ansatz_reps),
         n_train_samples=len(x),
         max_steps=max_steps,
         batch_size=batch_size,
-        # How many times the (simulated) quantum circuit's expectation value
-        # was actually estimated over the whole run.
         n_expvals=getattr(model, "n_expvals", None),
         final_weights=final_weights,
         cst=cst,
         notes=notes,
+        seed=seed,
     )
 
 
@@ -175,10 +160,8 @@ def record_training(
     experiments_csv: str = EXPERIMENTS_CSV,
     path: str = "results/",
 ) -> str:
-    """Persist a TrainingResult (from run_training, possibly computed in a
-    different process) to experiments.csv and costs/{id}.npy. See
-    run_training's docstring for why this is a separate call -- only call
-    this from one process at a time against a given `path`.
+    """Persist a TrainingResult to experiments.csv and costs/{id}.npy. 
+    only call this from one process at a time against a given `path`.
 
     Returns
     -------
@@ -187,8 +170,6 @@ def record_training(
     """
     experiments_csv = experiments_csv if path is None else os.path.join(path, experiments_csv)
 
-    _ensure_csv(experiments_csv, EXPERIMENTS_FIELDS)
-
     experiment_id = str(uuid.uuid4())
     timestamp = datetime.now().isoformat(timespec="seconds")
     cst = result.cst
@@ -196,27 +177,25 @@ def record_training(
     exp_row = {
         "id":               experiment_id,
         "timestamp":        timestamp,
+        "git_commit":       results_io.git_commit_hash(),
         "circuit_num":      result.circuit_num,
         "generic":          result.generic,
         "n_qubits":         result.n_qubits,
         "layers":           result.layers,
-        "anzats_reps":      result.anzats_reps,
+        "ansatz_reps":      result.ansatz_reps,
         "n_params":         result.n_params,
         "n_train_samples":  result.n_train_samples,
         "max_steps":        result.max_steps,
         "batch_size":       result.batch_size,
         "n_expvals":        result.n_expvals,
-        # cst[0]/cst[-1]: the first/last step's own (pre-update) batch loss --
-        # see train()'s docstring for why it's the batch loss, not a separate
-        # full-dataset evaluation.
+        # cst[0]/cst[-1]: the first/last step's own (pre-update) batch loss
         "initial_cost":     round(float(cst[0].item()), 8),
         "final_cost":       round(float(cst[-1].item()), 8),
+        "seed":             result.seed,
         "notes":            result.notes,
     }
-    _append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
+    results_io.append_row(experiments_csv, EXPERIMENTS_FIELDS, exp_row)
 
-    # cst holds every one of the max_steps optimizer steps' own batch loss --
-    # no separate pre-training slot to skip any more (see train()'s docstring).
     save_cost_curve(experiment_id, cst.detach().numpy(), path=path)
 
     print(f"[tracker] Experiment {experiment_id} saved "
@@ -229,24 +208,22 @@ def record_training(
 def train_and_record(
     x,
     target_y,
-    circuit_num: int,
+    arch: Architecture,
     n_qubits: int,
     layers: int,
-    anzats_reps: int,
+    ansatz_reps: int,
     max_steps: int = 200,
     batch_size: int = 100,
     display_step: int = 10,
     notes: str = "",
     experiments_csv: str = EXPERIMENTS_CSV,
-    train_fn = train,
     path: str = "results/",
-    generic: bool = False,
+    seed: "Optional[int]" = None,
 ):
     """
     Run `run_training` then `record_training` -- the single-call,
-    single-process convenience most callers want. See their own docstrings
-    for the parallel-friendly split (run.py's `--n-workers` uses it
-    directly instead of this wrapper).
+    single-process convenience most callers want. 
+    run.py's `--n-workers` uses the funtion insted of this wrapper.
 
     Returns
     -------
@@ -256,9 +233,9 @@ def train_and_record(
     cost_history : torch.Tensor  shape (max_steps,)
     """
     result = run_training(
-        x, target_y, circuit_num, n_qubits, layers, anzats_reps,
+        x, target_y, arch, n_qubits, layers, ansatz_reps,
         max_steps=max_steps, batch_size=batch_size, display_step=display_step,
-        notes=notes, train_fn=train_fn, generic=generic,
+        notes=notes, seed=seed,
     )
     experiment_id = record_training(result, experiments_csv=experiments_csv, path=path)
     return experiment_id, result.final_weights, result.cst

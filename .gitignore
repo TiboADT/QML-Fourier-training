@@ -7,3 +7,5 @@ output.log
 .vscode/
 *.out
 pull_remote_results.sh
+/ref/
+/new/

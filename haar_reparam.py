@@ -20,8 +20,8 @@ specific (still closed-form) reshaping, and the 3 non-local ("canonical")
 angles need a fully joint, non-separable reshaping with no simple
 closed-form inverse-CDF.
 
-This module supplies that reshaping ("Phi" in the design discussion) so
-that circuits.py's circuit_set(34), fed raw Uniform(0, 2*pi) parameters
+This module supplies that reshaping so that circuits.py's circuit_set(34),
+fed raw Uniform(0, 2*pi) parameters
 (exactly what sample_unitaries already produces for every other circuit),
 produces exactly Haar-distributed two-qubit unitaries. circuit_set(33) is
 the same gate structure with the raw angles used directly instead (no
@@ -44,16 +44,16 @@ Non-local part (3 of 15 parameters) — empirical Rosenblatt transform
 ----------------------------------------------------------------------
 The core circuit used here is (wires (c, t), applied as
 CNOT(c->t); RZ(tz) on t; RY(ty1) on c; CNOT(t->c); RY(ty2) on c; CNOT(c->t)):
-this is the standard 3-CNOT canonical-gate circuit, verified (see
-scratch/derive_core*.py in the design session) to give full-rank coverage
-of the 3-parameter Weyl chamber.
+this is the standard 3-CNOT canonical-gate circuit, verified numerically
+(via direct rank computation over sampled points) to give full-rank
+coverage of the 3-parameter Weyl chamber.
 
 The exact analytic Haar-pushforward density for (tz, ty1, ty2) involves a
 Weyl-integration-formula-type sine-product over an auxiliary eigenphase
-labelling that is genuinely fiddly to get right by hand (see the design
-notes: an initial closed-form derivation was numerically WRONG -- verified
-via round-trip frame-potential testing against known Haar values -- because
-of an unresolved sign/branch ambiguity in extracting those eigenphases).
+labelling that is genuinely fiddly to get right by hand -- an initial
+closed-form derivation attempted here was numerically WRONG (caught via
+round-trip frame-potential testing against known Haar values), because
+of an unresolved sign/branch ambiguity in extracting those eigenphases.
 
 Instead this module builds the reparametrization empirically and exactly:
     1. Draw N Haar-random SU(4) matrices the standard, trusted way
@@ -67,13 +67,13 @@ Instead this module builds the reparametrization empirically and exactly:
        ty2 | (tz, ty1).
     4. At runtime, feed 3 fresh Uniform[0,1) numbers through that transform.
 
-This was validated end to end (see design session): pushing samples through
-this transform reproduces the exact Haar frame potential F^(t) = t! for
-t = 1, 2, 3 to within Monte Carlo error.
+This was validated end to end: pushing samples through this transform
+reproduces the exact Haar frame potential F^(t) = t! for t = 1, 2, 3 to
+within Monte Carlo error.
 
 Regenerating the tables
 ------------------------
-    python two_designs/haar_reparam.py --build [--n-samples 50000]
+    python haar_reparam.py --build [--n-samples 50000]
 
 writes kak1_rosenblatt_tables.npz next to this file. A table is checked
 into the repo so this is only needed if you want higher resolution or a
@@ -100,7 +100,7 @@ def _load_tables(device=None, dtype=torch.float64):
         return _cache[key]
     if not os.path.exists(_TABLE_PATH):
         raise FileNotFoundError(
-            f"{_TABLE_PATH} not found. Run `python two_designs/haar_reparam.py --build` "
+            f"{_TABLE_PATH} not found. Run `python haar_reparam.py --build` "
             "once to generate it (takes a few minutes)."
         )
     npz = np.load(_TABLE_PATH)
@@ -198,18 +198,20 @@ def euler_angles(u_alpha: torch.Tensor, u_beta: torch.Tensor, u_gamma: torch.Ten
 # applied to a big batch (frame_potential.sample_unitaries's whole design,
 # behind circuit_set(33)/(34)). It is the wrong thing when a caller needs
 # MANY small, differently-wired constructions -- e.g.
-# two_designs/range_connectivity.py, which draws a fresh 2-qubit gate
+# extras/range_connectivity.py, which draws a fresh 2-qubit gate
 # embedding per wire pair per layer per wiring instance: retracing
 # circuits.py's PennyLane queue on every one of those calls turned out to
 # dominate runtime completely (a few thousand retraces of a tiny circuit
 # costs far more than the circuit itself). kak1_block_matrix below is the
-# same math -- same gate sequence, same GlobalPhase(-pi/4) det correction
-# -- reimplemented as direct batched torch matrix construction, with no
-# PennyLane tracing at all. Verified to agree with
-# frame_potential.sample_unitaries(33, ...) (which goes through circuits.py
-# and PennyLane) to machine precision -- see
-# two_designs/range_connectivity.py's module docstring / the design
-# session's own checks for how.
+# same gate sequence, reimplemented as direct batched torch matrix
+# construction with no PennyLane tracing at all -- except for one
+# deliberate divergence: it applies an extra e^(i*pi/4) global phase to
+# the canonical core that circuits.py's core_kak does not (confirmed:
+# without that factor the two match to machine precision; with it, they
+# differ by exactly that phase). Frame potential only ever reads
+# |Tr(U_i^dag U_j)|, which is invariant to a global phase on either
+# factor, so this has no effect on any result -- but the two functions do
+# not produce identical matrices, only identical frame-potential statistics.
 
 def _rz_matrix(theta: torch.Tensor) -> torch.Tensor:
     """theta: (...,) real -> (..., 2, 2) complex128."""
@@ -255,7 +257,7 @@ _CNOT_Q1Q0 = torch.tensor([[1, 0, 0, 0], [0, 0, 0, 1], [0, 0, 1, 0], [0, 1, 0, 0
 def kak1_block_matrix(raw15: torch.Tensor) -> torch.Tensor:
     """raw15: (15, B) tensor, entries Uniform(0, 2*pi) -- one full, standalone
     KAK1 block: [0:3]=A1, [3:6]=A0, [6:9]=canonical, [9:12]=B1, [12:15]=B0,
-    same convention two_designs/range_connectivity.py's draw_display_circuit
+    same convention extras/range_connectivity.py's draw_display_circuit
     builds per gate (every gate there is independent, nothing to inherit a
     dressing from -- unlike circuit_set(33)/(34), which only use this full
     form for a wire's first touch and a truncated 9-parameter form after).

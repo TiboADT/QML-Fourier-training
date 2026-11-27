@@ -46,59 +46,54 @@ def header(title):
     print(f"\n{'=' * 74}\n{title}\n{'=' * 74}")
  
  
-# ── 1. frame potential: einsum vs GEMM ─────────────────────────────────────
- 
+# ── 1. frame potential: pairwise traces (GEMM) ─────────────────────────────
+
 def bench_frame_potential(device):
-    header(f"1. Pairwise traces — einsum vs GEMM   [{device}]")
-    print(f"{'n_qubits':>9} {'N':>6} {'einsum':>10} {'GEMM':>10} {'speedup':>9} "
-          f"{'einsum peak':>12} {'GEMM peak':>10}")
- 
+    """Throughput of _estimate_from_batches's own pairwise-trace step (a
+    single GEMM -- see frame_potential.py). An einsum formulation was
+    benchmarked against this early on and dropped for being both slower
+    and higher-peak-memory; this only times what the code actually runs.
+    """
+    header(f"1. Pairwise traces — GEMM   [{device}]")
+    print(f"{'n_qubits':>9} {'N':>6} {'time':>10} {'peak mem':>10}")
+
     for n_qubits, N in [(4, 200), (6, 128), (6, 256), (8, 128)]:
         d = 2 ** n_qubits
         UA = torch.randn(N, d, d, dtype=torch.complex64, device=device)
         UB = torch.randn(N, d, d, dtype=torch.complex64, device=device)
- 
-        def with_einsum():
-            A, B = UA.unsqueeze(1), UB.unsqueeze(0)
-            return torch.einsum("bipq,bjpq->bij", A.conj(), B).squeeze(1)
- 
+
         def with_gemm():
             return UA.reshape(N, -1).conj() @ UB.reshape(N, -1).T
- 
+
         try:
-            t_ein = timeit(with_einsum)
+            t_gem = timeit(with_gemm)
         except RuntimeError as e:                       # OOM is itself the result
-            print(f"{n_qubits:>9} {N:>6} {'OOM':>10} "
-                  f"{timeit(with_gemm)*1000:>9.2f}ms {'-':>9}   ({str(e)[:30]})")
+            print(f"{n_qubits:>9} {N:>6} {'OOM':>10}   ({str(e)[:30]})")
             continue
-        t_gem = timeit(with_gemm)
- 
-        err = (with_einsum() - with_gemm()).abs().max().item()
-        peak_ein = N * N * d * d * 8 / 1e9
+
         peak_gem = (2 * N * d * d * 8 + N * N * 8) / 1e9
-        print(f"{n_qubits:>9} {N:>6} {t_ein*1000:>9.2f}ms {t_gem*1000:>9.2f}ms "
-              f"{t_ein/t_gem:>8.1f}x {peak_ein:>11.2f}GB {peak_gem:>9.3f}GB"
-              f"   (max|diff| {err:.1e})")
- 
+        print(f"{n_qubits:>9} {N:>6} {t_gem*1000:>9.2f}ms {peak_gem:>9.3f}GB")
+
     print("\nLargest N that fits an 8 GB budget at 6 qubits:")
     import math
     d, bpe, usable = 64, 8, 8e9 * 0.5
     a, b = bpe, 2 * d * d * bpe
-    print(f"  current  (N,N,d,d)      : N = {int(math.sqrt(usable / (d*d*bpe)))}")
-    print(f"  GEMM     (N,d^2) + (N,N): N = {int((-b + math.sqrt(b*b + 4*a*usable)) / (2*a))}")
+    print(f"  GEMM (N,d^2) + (N,N): N = {int((-b + math.sqrt(b*b + 4*a*usable)) / (2*a))}")
  
  
 def bench_sample_unitaries(device):
     header(f"2. sample_unitaries throughput   [{device}]")
     try:
         import frame_potential as fp
+        from architectures import get_architecture
     except ImportError as e:
         print(f"  skipped ({e}) — run from the repo root")
         return
     print(f"{'circuit':>8} {'reps':>5} {'N':>6} {'time':>10} {'per unitary':>13}")
     for num, reps, N in [(18, 1, 128), (18, 3, 128), (5, 3, 128)]:
         try:
-            t = timeit(lambda: fp.sample_unitaries(num, 6, reps, N, device=device))
+            arch = get_architecture(num)
+            t = timeit(lambda: fp.sample_unitaries(arch, 6, reps, N, device=device))
             print(f"{num:>8} {reps:>5} {N:>6} {t*1000:>9.1f}ms {t/N*1e6:>11.1f}us")
         except Exception as e:
             print(f"{num:>8} {reps:>5} {N:>6}   failed: {str(e)[:40]}")
@@ -123,6 +118,7 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2, generic
     """
     header(f"2b. Frame-potential stress test — scaling with n_qubits   [{device}]")
     import frame_potential as fp
+    from architectures import get_architecture
 
     if n_qubits_list is None:
         n_qubits_list = [8, 10, 12]
@@ -136,6 +132,7 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2, generic
           f"{'n_pairs':>12} {'fid_err':>9}")
 
     for num in circuits:
+        arch = get_architecture(num, generic=generic)
         for n_qubits in n_qubits_list:
             d = 2 ** n_qubits
             row = f"{num:>7} {n_qubits:>9} {d:>7}"
@@ -149,8 +146,7 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2, generic
             try:
                 sample_batch = max(2, min(32, max_batch))
                 t_sample = timeit(
-                    lambda: fp.sample_unitaries(num, n_qubits, reps, sample_batch,
-                                                 generic=generic, device=device),
+                    lambda: fp.sample_unitaries(arch, n_qubits, reps, sample_batch, device=device),
                     repeats=1, warmup=1,
                 )
                 row += f" {t_sample*1000:>9.1f}ms"
@@ -161,7 +157,7 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2, generic
             try:
                 n_samples_once = max(4, min(4 * d, max_batch))
                 t0 = time.perf_counter()
-                fp.estimate_once(num, n_qubits, reps, t, n_samples_once, generic=generic, device=device)
+                fp.estimate_once(arch, n_qubits, reps, t, n_samples_once, device=device)
                 t_once = time.perf_counter() - t0
                 row += f" {t_once:>13.2f}s"
             except RuntimeError as e:
@@ -171,7 +167,7 @@ def bench_stress(device, n_qubits_list=None, circuits=None, reps=1, t=2, generic
 
             try:
                 t0 = time.perf_counter()
-                est = fp.estimate_until_converged(num, n_qubits, reps, t, generic=generic, device=device)
+                est = fp.estimate_until_converged(arch, n_qubits, reps, t, device=device)
                 t_conv = time.perf_counter() - t0
                 row += f" {t_conv:>10.2f}s {est.n_pairs:>12,} {est.fidelity_error:>9.4f}"
             except RuntimeError as e:
@@ -208,15 +204,16 @@ def bench_square_loss():
 def bench_training_step(devices):
     header("4. One training step, by device and batch size")
     try:
-        from functions import build_model, square_loss
+        from training import build_model, square_loss
+        from architectures import get_architecture
     except ImportError as e:
         print(f"  skipped ({e}) — run from the repo root")
         return
- 
+
     for dev_name in devices:
         dev = torch.device(dev_name)
         try:
-            model, weights = build_model(18, 6, layers=3, anzats_reps=3, measuring_qubit=5)
+            model, weights = build_model(get_architecture(18), 6, layers=3, ansatz_reps=3, measuring_qubit=5)
         except Exception as e:
             print(f"  {dev_name}: build_model failed: {str(e)[:60]}")
             continue
@@ -251,26 +248,27 @@ def bench_devices():
     header("5. PennyLane device comparison (forward pass, 6 qubits)")
     try:
         import pennylane as qp
-        from circuits import circuit_set, weight_tensor_shape
+        from architectures import get_architecture
     except ImportError as e:
         print(f"  skipped ({e})")
         return
- 
+
     n, reps, layers = 6, 3, 3
-    shape = (layers,) + weight_tensor_shape(18, n, reps)
+    arch = get_architecture(18)
+    shape = (layers,) + arch.weight_shape(n, reps)
     w = 2 * torch.pi * torch.rand(shape)
     x = torch.linspace(-torch.pi, torch.pi, 800)
- 
+
     for dev_name in ["default.qubit", "lightning.qubit", "lightning.gpu"]:
         try:
             dev = qp.device(dev_name, wires=n)
         except Exception as e:
             print(f"  {dev_name:<18} unavailable ({str(e)[:45]})")
             continue
- 
+
         @qp.qnode(dev, interface="torch")
         def circuit(weights, xs):
-            f = circuit_set(num=18)
+            f = arch.build
             f(weights[0], wires=list(range(n)))
             for l in range(layers - 1):
                 for q in range(n):

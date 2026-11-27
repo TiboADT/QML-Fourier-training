@@ -1,8 +1,7 @@
-"""Local random circuits (two_designs/haar_reparam.py's exact-Haar KAK1
+"""Local random circuits (haar_reparam.py's exact-Haar KAK1
 block, brickwork-tiled -- circuits.py's circuit 34) versus "permuted
 brickwork" -- the same blocks, but each layer wires up a *fresh random*
-pairing of qubits instead of a fixed nearest-neighbour pattern ("Family C"
-in the "Building 2-Designs" design notes). The claim worth checking: at
+pairing of qubits instead of a fixed nearest-neighbour pattern. The claim worth checking: at
 matched two-qubit gate count, letting gates reach further needs less depth
 to approach a 2-design -- connectivity as its own axis, independent of
 gate count.
@@ -20,9 +19,8 @@ pair qubits i, j with |i - j| <= max_range.
     max_range >= n_qubits - 1  every pair is reachable -- "permuted
                                 brickwork" / the fully-connected limit,
                                 no restriction at all
-    1 < max_range < n_qubits-1 the graduated middle ground the design
-                                notes don't explore but this module lets
-                                you sweep
+    1 < max_range < n_qubits-1 the graduated middle ground this module
+                                lets you sweep
 
 Why a new sampler rather than a circuit_set number: the wiring genuinely
 has to be random *per sample*, not just per parameter -- a circuit_set
@@ -30,7 +28,7 @@ architecture is one fixed gate sequence traced once and then batch-applied
 with random angles (see frame_potential.sample_unitaries), which has no
 room for "which wires" to vary within a batch. So this plugs into
 frame_potential's generic sampler interface instead (same reason
-two_designs/clifford_group.py does) -- but it still reuses circuit 34's
+checks/clifford_group.py does) -- but it still reuses circuit 34's
 Haar-reparametrized math for the actual 2-qubit gate (via
 haar_reparam.kak1_block_matrix, a
 direct/PennyLane-free reimplementation used here specifically because this
@@ -40,8 +38,8 @@ runtime completely; see that function's docstring) and
 frame_potential.apply_embedded_gate for embedding it at a chosen wire
 pair. This module only adds the wiring logic circuit_set has no room for.
 
-Two-level sampling, matching the design notes' own methodology ("Permuted
-values averaged over 40 wiring samples"): each requested batch is built
+Two-level sampling ("Permuted values averaged over 40 wiring samples"):
+each requested batch is built
 from several independent wiring draws (a fresh random matching per layer),
 each evaluated at `samples_per_wiring` independent angle-draws before
 moving to the next wiring. Within one wiring's sub-batch, samples share
@@ -61,7 +59,7 @@ import torch
 
 from circuits import core_kak, haar_su2_params, local_su2
 from frame_potential import apply_embedded_gate, get_device
-from two_designs.haar_reparam import kak1_block_matrix, sample_canonical
+from haar_reparam import kak1_block_matrix, sample_canonical
 
 
 def random_matching(n_qubits: int, max_range: int, rng: np.random.Generator) -> list[tuple[int, int]]:
@@ -118,7 +116,7 @@ def sample_range_connected_unitaries(n_qubits: int, reps: int, max_range: int, b
 
     Reproducible via `generator` (a torch.Generator) despite the wiring
     being drawn with numpy: a seed is derived from `generator` once per
-    call, unlike two_designs/clifford_group.py's stim-backed sampler,
+    call, unlike checks/clifford_group.py's stim-backed sampler,
     which has no seed hook at all.
     """
     if device is None:

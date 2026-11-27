@@ -1,13 +1,12 @@
 """Calibration + comparison check for range-limited connectivity
-(two_designs/range_connectivity.py) -- "Family C" in the "Building
-2-Designs" design notes: same exact-Haar KAK1 block as circuit 34 in the
+(extras/range_connectivity.py): same exact-Haar KAK1 block as circuit 34 in the
 local-random check, same gate count, but each layer wires up a fresh
 random matching restricted to pairs at most `max_range` apart, instead of
 a fixed nearest-neighbour brickwork. max_range=1 is "local" in the same
 style as circuit 34; max_range >= n_qubits-1 is "fully connected" /
 "permuted brickwork" -- no restriction on which pair a gate can touch.
 
-Unlike checks/validate_clifford.py and checks/validate_local_random.py,
+Unlike checks/validate_clifford.py and extras/validate_local_random.py,
 the point here isn't just "does this match Haar" -- it's "how does
 approach-to-Haar depend on connectivity range, at matched gate count and
 depth". So the main thing this script does is print a comparison table
@@ -29,7 +28,7 @@ import math
 import torch
 
 import frame_potential as fp
-from two_designs.range_connectivity import sample_range_connected_unitaries
+from extras.range_connectivity import sample_range_connected_unitaries
 
 
 def _sampler(n_qubits, reps, max_range, samples_per_wiring):

@@ -1,6 +1,5 @@
-"""Calibration check for local random circuits ("Family B" in the "Building
-2-Designs" design notes): circuit 34 (Haar-reparametrized KAK1 blocks,
-brickwork-tiled across N qubits, backed by two_designs/haar_reparam.py) and
+"""Calibration check for local random circuits: circuit 34 (Haar-reparametrized KAK1 blocks,
+brickwork-tiled across N qubits, backed by haar_reparam.py) and
 its ablation twin, circuit 33 (identical gate structure, raw angles used
 directly instead of Haar-reparametrized -- no correction at all).
 
@@ -33,6 +32,9 @@ import time
 import torch
 
 import frame_potential as fp
+from architectures import get_architecture
+
+_ARCH_34 = get_architecture(34)
 
 
 def check_single_block(n_samples=8000, ts=(1, 2, 3)):
@@ -40,17 +42,21 @@ def check_single_block(n_samples=8000, ts=(1, 2, 3)):
     reasoning as the Clifford-group check's check_sampled: pick a sample
     size that gives a usefully tight CI, don't chase convergence.
 
-    reps=3, not 1: at n_qubits=2 the alternating-offset brickwork's
-    layer_pairs alternates [1, 0, 1, 0, ...] (see
-    circuits._brickwork_layer_pairs) -- layer 0 is dressing-only by
-    construction, and layer 1 is an odd layer that fires zero gates at
-    this qubit count, so reps=1 or 2 would test a product of two
-    disconnected Haar-SU(2) rotations, not an actual KAK1 block. reps=3
-    is the smallest value that actually applies one."""
-    print(f"--- circuit 34 (single block, n_qubits=2, reps=3), n_samples={n_samples} ---")
+    reps=2, not 1: circuit 34's main loop runs range(reps-1) repetitions,
+    each applying a dressing-and-core (even layer) or nothing at all (odd
+    layer, zero gates at this qubit count -- see
+    circuits.brickwork_layer_pairs's alternation), followed by one
+    closing dressing-only layer. reps=1 runs the main loop zero times, so
+    it is just that closing dressing: a product of disconnected Haar-SU(2)
+    rotations, no entangling core at all. reps=2 is the smallest value
+    whose main loop actually reaches the (even) layer that applies one --
+    confirmed via circuits.n_trainable(34, 2, reps): 6 at reps=1, 15 at
+    reps=2 and (identically) reps=3, since reps=3's extra layer is the
+    next, odd one, which fires nothing at this qubit count."""
+    print(f"--- circuit 34 (single block, n_qubits=2, reps=2), n_samples={n_samples} ---")
     device = torch.device("cpu")
     for t in ts:
-        est = fp.estimate_once(34, n_qubits=2, reps=3, t=t, n_samples=n_samples,
+        est = fp.estimate_once(_ARCH_34, n_qubits=2, reps=2, t=t, n_samples=n_samples,
                                 device=device, dtype=torch.complex128)
         within_ci = abs(est.delta) <= max(est.fidelity_error, 1e-9)
         print(f"  t={t}  F={est.frame_potential:.4f}  Haar={est.haar:.1f}  "
@@ -68,7 +74,7 @@ def check_brickwork_depth(n_qubits=4, reps_list=(1, 2, 4, 8), t=2, n_samples=400
     device = torch.device("cpu")
     haar = math.factorial(t)
     for reps in reps_list:
-        est = fp.estimate_once(34, n_qubits=n_qubits, reps=reps, t=t, n_samples=n_samples,
+        est = fp.estimate_once(_ARCH_34, n_qubits=n_qubits, reps=reps, t=t, n_samples=n_samples,
                                 device=device, dtype=torch.complex128)
         print(f"  reps={reps:<3d}  F={est.frame_potential:.4f}  Haar={haar:.1f}  "
               f"ratio={est.ratio:.4f}")
@@ -76,7 +82,7 @@ def check_brickwork_depth(n_qubits=4, reps_list=(1, 2, 4, 8), t=2, n_samples=400
     print()
 
 
-def check_convergence_pathology(n_qubits=2, reps=3, t=2, rel_tol=0.3, max_batches=50):
+def check_convergence_pathology(n_qubits=2, reps=2, t=2, rel_tol=0.3, max_batches=50):
     """Does estimate_until_converged hit max_batches without satisfying its
     own stopping rule, the way it did on the (exactly-designed) Clifford
     ensemble? Circuit 34's delta is small (it's *supposed* to be near-Haar),
@@ -84,17 +90,17 @@ def check_convergence_pathology(n_qubits=2, reps=3, t=2, rel_tol=0.3, max_batche
     as achievable precision -- is expected here too. This runs it and
     reports what actually happened rather than assuming.
 
-    reps=3, not 1: see check_single_block's docstring -- n_qubits=2 needs
-    reps>=3 to apply an actual KAK1 block at all."""
+    reps=2, not 1: see check_single_block's docstring -- n_qubits=2 needs
+    reps>=2 to apply an actual KAK1 block at all."""
     print(f"--- convergence-loop diagnostic: estimate_until_converged(34, t={t}) ---")
     device = torch.device("cpu")
     t0 = time.time()
-    est = fp.estimate_until_converged(34, n_qubits=n_qubits, reps=reps, t=t, rel_tol=rel_tol,
+    est = fp.estimate_until_converged(_ARCH_34, n_qubits=n_qubits, reps=reps, t=t, rel_tol=rel_tol,
                                        max_batches=max_batches, device=device,
                                        dtype=torch.complex128)
     elapsed = time.time() - t0
     target = abs(rel_tol * est.delta)
-    converged = est.fidelity_error <= target or est.fidelity_error <= 1e-5
+    converged = est.converged
     within_ci = abs(est.delta) <= max(est.fidelity_error, 1e-9)
     print(f"  t={t}  F={est.frame_potential:.4f}  Haar={est.haar:.1f}  delta={est.delta:+.4f}  "
           f"95% CI +/-{est.fidelity_error:.4f}  "

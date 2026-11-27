@@ -1,5 +1,4 @@
-"""Random Clifford circuits ("Family A" in the "Building 2-Designs" design
-notes), used purely as a calibration ensemble.
+"""Random Clifford circuits, used purely as a calibration ensemble.
 
 The n-qubit Clifford group is an exact 3-design (Zhu 2017 / Webb 2016; see
 also the "Six families" note this module implements), and fails at t=4

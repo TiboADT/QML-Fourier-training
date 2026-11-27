@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Launch run.py (train or frame-potential) in the background, detached from
 # the terminal, so a long sweep on a remote machine survives you closing the
-# connection (see README's "Remote / background runs" section for
-# the reasoning, and the risks worth knowing before you rely on this).
+# connection 
 #
 # Usage:
 #   ./run_background.sh train [run.py train's own flags...]
@@ -32,7 +31,7 @@ cd "$SCRIPT_DIR"
 
 # This define a function to show the documentation
 usage() {
-    sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 # Check that run.py is present in the same directory as this script
@@ -62,10 +61,6 @@ done
 # Assure that the commmande given is valide
 COMMAND="${1:-}"
 if [[ -z "$COMMAND" || "$COMMAND" == -* ]]; then
-    # No subcommand given at all, or the first thing we got was a flag
-    # (e.g. you ran `./run_background.sh --circuits 1 ...` and forgot
-    # train or frame-potential) -- either way, ask rather than guessing, and
-    # leave "$@" untouched (there's no subcommand token in it to shift off).
     echo "Which computation do you want to run?"
     select COMMAND in "train" "frame-potential"; do
         [[ -n "$COMMAND" ]] && break
@@ -90,14 +85,6 @@ EXIT_FILE="results/logs/${COMMAND}_${STAMP}.exitcode"
 echo "Launching: $PYTHON run.py $COMMAND $*"
 echo "Logging to: $LOG_FILE"
 
-# -u: unbuffered, so the log fills in real time instead of only on flush/exit.
-# The exit code is captured *inside* the backgrounded subshell and written to
-# EXIT_FILE, rather than relying on `wait "$PID"` after disown below --
-# disown doesn't just stop SIGHUP forwarding, it also makes bash unable to
-# report that PID's real exit status (confirmed: `false & disown; wait $!`
-# reports success regardless of what the child actually did), so `wait`
-# can't tell "crashed" from "finished fine" apart once disowned. A file the
-# process writes itself has no such problem.
 nohup bash -c '"$1" -u run.py "$2" "${@:5}" > "$3" 2>&1; echo $? > "$4"' _ \
     "$PYTHON" "$COMMAND" "$LOG_FILE" "$EXIT_FILE" "$@" &
 PID=$!
@@ -107,14 +94,6 @@ disown "$PID"
 echo "Process started with PID: $PID (also saved to $PID_FILE)"
 echo "Process disowned -- you can safely close the terminal."
 
-# A backgrounded+disowned process that fails immediately (bad flag, import
-# error, missing file) gives no feedback in the terminal -- you'd only find
-# out by checking the log later, possibly much later. Catch that specific
-# case here: poll for up to 25s (importing torch+pennylane alone routinely
-# takes several seconds -- measured ~8s on my local machine just to reach and
-# fail a bad --circuits value, so a short fixed sleep missed it entirely)
-# and react the moment it exits, rather than either a fixed sleep too short
-# to catch this, or blocking until a genuinely long run finishes.
 echo
 echo "Waiting up to 25s to see if the process fails immediately (import/flag problem)."
 for _ in $(seq 1 25); do

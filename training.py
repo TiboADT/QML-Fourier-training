@@ -1,38 +1,25 @@
+import numpy as np
 import pennylane as qp
-from pennylane import numpy as np
-import matplotlib.pyplot as plt
 
 import torch
 
-from circuits import circuit_set, weight_tensor_shape
+from architectures import Architecture
 
 # ── Training and cost functions ───────────────────────────────────────────────
 
 def square_loss(targets, predictions):
-    loss = 0
-    for t, p in zip(targets, predictions):
-        loss += (t - p) ** 2
-    loss = loss / len(targets)
-    return 0.5 * loss
-
-
-def cost_model(model):
-    def cost(weights, x, y):
-        predictions = model(weights, x)
-        return square_loss(y, predictions)
-    return cost
+    return 0.5 * ((targets - predictions) ** 2).mean()
 
 
 def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step=10, display=True):
     """`model` (from build_model) """
     weights = weights.detach().clone().requires_grad_(True)
     opt = torch.optim.Adam([weights], lr = 0.1)
-    cost = cost_model(model)
     cst = torch.zeros(max_steps, dtype=torch.float32)
 
     def closure():
         opt.zero_grad()
-        loss = cost(weights, x_batch, y_batch)
+        loss = square_loss(y_batch, model(weights, x_batch))
         loss.backward()
         return loss
 
@@ -43,7 +30,7 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
         y_batch = target_y[perm[:batch_size]]
 
         # update the weights by one optimizer step, and record that step's
-        # own (pre-update) batch loss -- already computed, nothing more to do
+        # own (pre-update) batch loss
         loss = opt.step(closure)
         cst[step] = loss.detach()
 
@@ -52,13 +39,12 @@ def train(model, weights, x, target_y, max_steps=70, batch_size=50, display_step
     return weights.detach(), cst
 
 
-def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit = 0, generic: bool = False):
-    """Build a model for the given circuit number, number of qubits, and repetitions.
-    generic=True: `circuit_num` is a generic_ansatz code"""
+def build_model(arch: Architecture, n_qubits, layers, ansatz_reps = 1, measuring_qubit = 0):
+    """Build a model for the given architecture, number of qubits, and repetitions."""
 
-    circuit_to_call = circuit_set(num=circuit_num, generic=generic)
+    circuit_to_call = arch.build
 
-    weights_shape = weight_tensor_shape(circuit_num, n_qubits, anzats_reps, generic=generic)
+    weights_shape = arch.weight_shape(n_qubits, ansatz_reps)
     weights_shape = (layers,) + weights_shape
     weights = 2 * torch.pi * torch.rand(weights_shape, requires_grad=True)
 
@@ -97,6 +83,8 @@ def build_model(circuit_num, n_qubits, layers, anzats_reps = 1, measuring_qubit 
 
 def show_results(model,weights, x, target_y, cst, title="Results"):
     """Helper function to visualize the results."""
+    import matplotlib.pyplot as plt
+
     predictions = model(weights, x)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
